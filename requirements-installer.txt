@@ -1,0 +1,5 @@
+# Dependencias incluidas en el instalador de Windows
+customtkinter>=5.2,<6
+sounddevice>=0.4.6,<1
+numpy>=1.24,<3
+faster-whisper>=1.1,<2
