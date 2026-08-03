@@ -1,0 +1,25 @@
+ASISTENTE DE CLASES — INSTALACIÓN EN WINDOWS
+
+1. Instala Python 3.10, 3.11 o 3.12 y marca “Add Python to PATH”.
+2. Instala FFmpeg:
+   winget install Gyan.FFmpeg
+3. Abre PowerShell en esta carpeta y ejecuta:
+   python -m venv .venv
+   .venv\Scripts\activate
+   python -m pip install --upgrade pip
+   pip install -r requirements.txt
+4. Ejecuta EJECUTAR.bat o:
+   python main.py
+
+DIARIZACIÓN OPCIONAL
+- Sin token de Hugging Face, el programa transcribe y etiqueta todo como Docente.
+- Para separar voces, crea un token de lectura en Hugging Face y acepta las condiciones de:
+  pyannote/speaker-diarization-community-1
+- Pega el token en Configuración y guarda.
+
+GPU NVIDIA
+- La aplicación intenta usar CUDA y vuelve automáticamente a CPU si no está disponible.
+- Para instalar PyTorch con CUDA, usa el selector oficial de PyTorch acorde con tu controlador.
+
+COMPROBACIÓN
+- Ejecuta COMPROBAR.bat para revisar Python, FFmpeg, dependencias y CUDA.
