@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+config.json
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+outputs/
+models/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
