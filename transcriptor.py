@@ -3,14 +3,34 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
 
+def _ffmpeg_executable() -> str:
+    """Localiza FFmpeg incluido en el instalador o disponible en el PATH."""
+    candidatos = []
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+        candidatos.extend([
+            os.path.join(base, "ffmpeg.exe"),
+            os.path.join(base, "bin", "ffmpeg.exe"),
+            os.path.join(os.path.dirname(sys.executable), "ffmpeg.exe"),
+            os.path.join(os.path.dirname(sys.executable), "bin", "ffmpeg.exe"),
+        ])
+    for ruta in candidatos:
+        if os.path.isfile(ruta):
+            return ruta
+    return "ffmpeg"
+
+
 def _verificar_ffmpeg() -> bool:
     try:
-        return subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5).returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return subprocess.run(
+            [_ffmpeg_executable(), "-version"], capture_output=True, timeout=5
+        ).returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
 
 
@@ -56,40 +76,45 @@ class TranscriptorClases:
                 callback_status(msg, p)
 
         if not _verificar_ffmpeg():
-            raise RuntimeError("FFmpeg no está instalado o no está en el PATH.")
+            raise RuntimeError("FFmpeg no está disponible.")
 
         status(f"Cargando Whisper {self.model_size}...", 0.1)
         from faster_whisper import WhisperModel
 
-        gpu_ok = False
+        # Faster-Whisper comprueba CUDA directamente. Así no necesitamos
+        # empaquetar PyTorch en el instalador básico.
         if self.usar_gpu:
             try:
-                import torch
-                gpu_ok = torch.cuda.is_available()
-            except Exception:
-                gpu_ok = False
-
-        if gpu_ok:
-            try:
-                self.whisper_model = WhisperModel(self.model_size, device="cuda", compute_type="float16")
+                self.whisper_model = WhisperModel(
+                    self.model_size, device="cuda", compute_type="float16"
+                )
                 self.dispositivo_real = "cuda"
             except Exception as exc:
                 print(f"GPU no disponible para Whisper ({exc}); usando CPU.")
 
         if self.whisper_model is None:
-            self.whisper_model = WhisperModel(self.model_size, device="cpu", compute_type="int8", cpu_threads=max(1, (os.cpu_count() or 4) - 1))
+            self.whisper_model = WhisperModel(
+                self.model_size,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=max(1, (os.cpu_count() or 4) - 1),
+            )
             self.dispositivo_real = "cpu"
         status(f"Whisper listo en {self.dispositivo_real.upper()}.", 0.55)
 
         if self.hf_token:
-            status("Cargando diarización...", 0.65)
+            status("Cargando diarización opcional...", 0.65)
             try:
                 import torch
                 from pyannote.audio import Pipeline
                 try:
-                    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-community-1", token=self.hf_token)
+                    pipeline = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-community-1", token=self.hf_token
+                    )
                 except TypeError:
-                    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=self.hf_token)
+                    pipeline = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-3.1", use_auth_token=self.hf_token
+                    )
                 if self.dispositivo_real == "cuda":
                     pipeline.to(torch.device("cuda"))
                 self.diarization_pipeline = pipeline
@@ -99,7 +124,7 @@ class TranscriptorClases:
                 self.diarization_pipeline = None
                 self.diarizacion_disponible = False
                 print(f"Diarización desactivada: {exc}")
-                status("Whisper listo; diarización no disponible.", 0.95)
+                status("Whisper listo; diarización no instalada.", 0.95)
         else:
             status("Whisper listo; sin token, se omite la diarización.", 0.95)
 
@@ -136,11 +161,7 @@ class TranscriptorClases:
             return [SegmentoTranscrito(s.start, s.end, s.text, "SPEAKER_00", "Docente") for s in segmentos_whisper]
 
         prog("Separando voces...", 0.6)
-        kwargs = {}
-        if min_hablantes == max_hablantes:
-            kwargs["num_speakers"] = min_hablantes
-        else:
-            kwargs.update(min_speakers=min_hablantes, max_speakers=max_hablantes)
+        kwargs = {"num_speakers": min_hablantes} if min_hablantes == max_hablantes else {"min_speakers": min_hablantes, "max_speakers": max_hablantes}
         salida = self.diarization_pipeline(archivo_audio, **kwargs)
         anotacion = getattr(salida, "exclusive_speaker_diarization", None) or getattr(salida, "speaker_diarization", None) or salida
         turnos = []
@@ -151,9 +172,8 @@ class TranscriptorClases:
             for turno, hablante in anotacion:
                 turnos.append({"inicio": turno.start, "fin": turno.end, "hablante": hablante})
 
-        fusionados = self._fusionar(segmentos_whisper, turnos)
         prog("Transcripción completada.", 1.0)
-        return self._asignar_roles(fusionados)
+        return self._asignar_roles(self._fusionar(segmentos_whisper, turnos))
 
     @staticmethod
     def _fusionar(segmentos_whisper, turnos):
