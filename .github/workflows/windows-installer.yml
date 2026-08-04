@@ -40,7 +40,7 @@ jobs:
           python -m compileall -q .
           python -m unittest discover -s tests -p "test_*.py"
 
-      - name: Construir aplicación
+      - name: Construir aplicación ARGOS v6
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --windowed --onedir `
@@ -50,7 +50,7 @@ jobs:
             --collect-all ctranslate2 `
             --hidden-import pypdf `
             --hidden-import docx `
-            main_v5.py
+            main_v6.py
 
       - name: Instalar Inno Setup
         shell: pwsh
