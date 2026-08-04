@@ -3,7 +3,7 @@ name: Construir ARGOS para Windows
 on:
   workflow_dispatch:
   push:
-    branches: [main, refactor/single-installer]
+    branches: [main]
     paths:
       - "**.py"
       - "tests/**"
@@ -52,6 +52,17 @@ jobs:
         shell: pwsh
         run: pyinstaller --noconfirm --clean ARGOS.spec
 
+      - name: Verificar FFmpeg empaquetado
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\ARGOS\ffmpeg.exe")) {
+            throw "El ejecutable empaquetado no contiene ffmpeg.exe"
+          }
+          & "dist\ARGOS\ffmpeg.exe" -version
+          if ($LASTEXITCODE -ne 0) {
+            throw "El ffmpeg.exe empaquetado no se puede ejecutar"
+          }
+
       - name: Instalar Inno Setup
         shell: pwsh
         run: choco install innosetup --yes --no-progress
@@ -76,7 +87,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release delete latest --yes --cleanup-tag 2>$null
+          gh release view latest *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete latest --yes --cleanup-tag
+          }
           gh release create latest "release/ARGOS-Setup.exe#ARGOS-Setup.exe" `
             --title "ARGOS — última versión" `
             --notes "Instalador único de ARGOS para Windows. Incluye la aplicación y FFmpeg; no requiere Python." `
