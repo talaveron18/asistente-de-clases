@@ -1,43 +1,88 @@
-# Asistente de Clases
+# ARGOS
 
-Aplicación local para grabar o importar clases, transcribirlas con Faster-Whisper y, opcionalmente, separar docente y alumnos con Pyannote.
+Aplicación local para grabar o importar clases de Medicina, transcribirlas, organizarlas y generar material de estudio con trazabilidad temporal y documental.
 
-## Estado
+## Aplicación única
 
-Primera versión funcional. La transcripción funciona sin token de Hugging Face. La diarización requiere un token y aceptar las condiciones del modelo de Pyannote.
+El único punto de entrada es:
 
-## Requisitos
+```text
+argos_app.py
+```
 
-- Windows 10/11
-- Python 3.10, 3.11 o 3.12
-- FFmpeg en el PATH
-- GPU NVIDIA opcional
+`main.py` contiene el núcleo reutilizable de grabación, transcripción, biblioteca y configuración. Ya no existen `main_v2.py`, `main_v3.py` ni versiones heredadas sucesivas.
 
-## Instalación rápida
+## Flujo de una clase
+
+```text
+Audio o vídeo
+→ Transcripción
+→ Organización por materia
+→ Limpieza y división temática
+→ Corrección médica auditable
+→ Apuntes y Word
+→ Flashcards y preguntas
+→ Referencias de la biblioteca local
+→ Índice SQLite FTS5
+```
+
+## Instalación para Windows
+
+El usuario final solo necesita un archivo:
+
+```text
+ARGOS-Setup.exe
+```
+
+El instalador incluye ARGOS y FFmpeg. No requiere Python ni una instalación manual de FFmpeg.
+
+La cadena oficial de construcción es única:
+
+```text
+argos_app.py
+→ ARGOS.spec
+→ installer.iss
+→ release/ARGOS-Setup.exe
+```
+
+El único workflow es:
+
+```text
+.github/workflows/windows-installer.yml
+```
+
+Cuando se ejecute correctamente en la rama `main`, publicará el instalador como artefacto y como Release `latest`.
+
+## Ejecución desde el código fuente
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
-python -m pip install --upgrade pip
 pip install -r requirements.txt
-python main.py
+python argos_app.py
 ```
 
-## GPU NVIDIA
+También puede utilizarse `EJECUTAR.bat`.
 
-Instala primero una versión de PyTorch compatible con tu controlador CUDA siguiendo el selector oficial de PyTorch. Después instala el resto de dependencias.
+## Funciones actuales
 
-## Uso sin diarización
-
-Deja vacío el token de Hugging Face. Whisper transcribirá normalmente y todos los segmentos aparecerán como `Docente`.
+- Grabación directa a WAV sin acumular la clase completa en memoria.
+- Faster-Whisper con GPU opcional y retorno a CPU.
+- Diarización opcional mediante Pyannote cuando se instala y configura.
+- Importación de audio y vídeo largo.
+- Archivo local por materia, fecha y número.
+- Biblioteca médica para PDF, DOCX, TXT y Markdown.
+- Extracción de PDF por página y detección de documentos que requieren OCR.
+- Índice SQLite FTS5 para clases y documentos.
+- Chat documental con referencias a página o minuto.
+- Apuntes Markdown y Word.
+- Flashcards TSV y preguntas de repaso.
+- Corrección médica mediante glosario explícito y registro de cambios.
 
 ## Privacidad
 
-El procesamiento es local. Los modelos se descargan la primera vez desde Hugging Face.
+El contenido se procesa y almacena localmente. Los modelos de transcripción pueden descargarse la primera vez que se utilizan.
 
-## Archivos
+## Estado
 
-- `main.py`: interfaz gráfica.
-- `grabador.py`: grabación directa a disco.
-- `transcriptor.py`: Whisper y Pyannote.
-- `config.py`: configuración local, excluida de Git.
+ARGOS continúa en fase alfa. El instalador debe considerarse validado únicamente después de que el workflow finalice correctamente y el `ARGOS-Setup.exe` se pruebe en un equipo Windows limpio.
