@@ -31,6 +31,36 @@ def test_documento_importado_y_procesado_llega_al_indice(tmp_path):
     assert resultados[0].pagina == 1
 
 
+def test_indice_recupera_extraccion_si_la_ruta_guardada_es_antigua(tmp_path):
+    raiz = tmp_path / "Asistente de Clases"
+    biblioteca = BibliotecaMedica(str(raiz / "Biblioteca médica"))
+    origen = tmp_path / "farreras.txt"
+    origen.write_text(
+        "La insuficiencia cardíaca puede producir congestión pulmonar.",
+        encoding="utf-8",
+    )
+    item, _ = biblioteca.importar_archivo(str(origen), "Tratados")
+    biblioteca.procesar_documento(item["id"])
+
+    indice_path = biblioteca.indice_path
+    registros = json.loads(indice_path.read_text(encoding="utf-8"))
+    registros[0]["ruta_extraccion"] = str(
+        tmp_path / "ubicacion_antigua" / "inexistente.json"
+    )
+    indice_path.write_text(
+        json.dumps(registros, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    indice = IndiceConocimientoSQLite(str(raiz))
+    stats = indice.reconstruir()
+    resultados = indice.buscar("congestión pulmonar", alcance="Tratados")
+
+    assert stats["documentos"] == 1
+    assert resultados
+    assert resultados[0].titulo == "farreras.txt"
+
+
 def test_indice_prefiere_transcripcion_medica_revisada(tmp_path):
     raiz = tmp_path / "Asistente de Clases"
     clase = raiz / "Inmunología" / "001 · 2026-08-04 · Citocinas"
@@ -54,3 +84,4 @@ def test_indice_prefiere_transcripcion_medica_revisada(tmp_path):
 
     assert resultados
     assert "interleucina 6" in resultados[0].contenido.lower()
+    assert "revisión médica" in resultados[0].ubicacion
