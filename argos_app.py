@@ -8,6 +8,7 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
+from bloqueos import BloqueoArchivo, BloqueoOcupadoError
 from chat_argos import ChatArgos
 from indice_sqlite import IndiceConocimientoSQLite
 from main import AsistenteClasesApp
@@ -28,13 +29,24 @@ class ArgosApp(AsistenteClasesApp):
         self._cola_pipeline: queue.Queue[dict] = queue.Queue()
         self._rutas_pendientes: set[str] = set()
         self._pipeline_activo = False
+        self._indice_pendiente = False
 
         self.tab_pipeline = self.tabs.add("Procesar clase")
         self.tab_chat = self.tabs.add("Chat ARGOS")
         self._crear_tab_pipeline()
         self._crear_tab_chat()
+        recuperadas = self.orquestador.recuperar_interrumpidos(
+            self.repositorio.raiz
+        )
         self._actualizar_selector_pipeline()
         self._actualizar_estado_indice()
+        if recuperadas:
+            self.estado_pipeline.configure(
+                text=(
+                    f"Se recuperaron {recuperadas} clases interrumpidas; "
+                    "puedes reprocesarlas."
+                )
+            )
 
         threading.Thread(
             target=self._consumir_cola_pipeline,
@@ -66,7 +78,9 @@ class ArgosApp(AsistenteClasesApp):
                 )
             return False
         self._rutas_pendientes.add(ruta)
-        self._cola_pipeline.put({"ruta": ruta, "automatico": automatico})
+        self._cola_pipeline.put(
+            {"tipo": "clase", "ruta": ruta, "automatico": automatico}
+        )
         posicion = self._cola_pipeline.qsize()
         self.estado_pipeline.configure(
             text=f"Clase añadida a la cola. Posición aproximada: {posicion}."
@@ -76,6 +90,9 @@ class ArgosApp(AsistenteClasesApp):
     def _consumir_cola_pipeline(self):
         while True:
             trabajo = self._cola_pipeline.get()
+            if trabajo.get("tipo") == "indice":
+                self._consumir_reconstruccion_indice()
+                continue
             ruta = trabajo["ruta"]
             automatico = bool(trabajo["automatico"])
             self._pipeline_activo = True
@@ -106,6 +123,50 @@ class ArgosApp(AsistenteClasesApp):
                 self._pipeline_activo = False
                 self._cola_pipeline.task_done()
                 self.after(0, self._fin_pipeline_ui)
+
+    def _consumir_reconstruccion_indice(self):
+        self._pipeline_activo = True
+        self.after(0, self._inicio_indice_ui)
+        try:
+            stats = self.indice_fts.reconstruir(
+                callback=lambda mensaje, progreso: self.after(
+                    0,
+                    self._actualizar_progreso_indice,
+                    mensaje,
+                    progreso,
+                )
+            )
+            self.after(0, self._indice_completado, stats)
+        except Exception as exc:
+            self.after(0, self._indice_error, str(exc))
+        finally:
+            self._indice_pendiente = False
+            self._pipeline_activo = False
+            self._cola_pipeline.task_done()
+            self.after(0, self._fin_pipeline_ui)
+
+    def _inicio_indice_ui(self):
+        self.btn_reprocesar.configure(state="disabled")
+        self.estado_chat.configure(text="Reconstruyendo índice FTS5...")
+        self.estado.configure(text="ARGOS está actualizando el índice...")
+
+    def _actualizar_progreso_indice(self, mensaje: str, progreso: float):
+        porcentaje = round(max(0.0, min(1.0, progreso)) * 100)
+        self.estado_chat.configure(text=f"{mensaje} ({porcentaje} %)")
+        self.estado.configure(text=mensaje)
+
+    def _indice_completado(self, stats: dict):
+        self._actualizar_estado_indice()
+        self.estado.configure(text="Índice FTS5 actualizado.")
+        messagebox.showinfo(
+            "Índice ARGOS",
+            f"Índice listo: {stats['bloques']} bloques.",
+        )
+
+    def _indice_error(self, error: str):
+        self.estado_chat.configure(text=f"Error al actualizar el índice: {error}")
+        self.estado.configure(text=f"Error al actualizar el índice: {error}")
+        messagebox.showerror("Índice ARGOS", error)
 
     def _inicio_pipeline_ui(self, ruta: str):
         self.btn_reprocesar.configure(state="disabled")
@@ -331,28 +392,18 @@ class ArgosApp(AsistenteClasesApp):
             self.estado_chat.configure(text=f"Índice no disponible: {exc}")
 
     def _reconstruir_indice(self):
-        if self._pipeline_activo or not self._cola_pipeline.empty():
+        if self._indice_pendiente:
             messagebox.showwarning(
                 "Índice ARGOS",
-                "Espera a que termine la cola de clases antes de reconstruir el índice.",
+                "La actualización del índice ya está en la cola.",
             )
             return
-        self.estado_chat.configure(text="Reconstruyendo índice FTS5...")
-
-        def worker():
-            try:
-                stats = self.indice_fts.reconstruir()
-                self.after(0, self._actualizar_estado_indice)
-                self.after(
-                    0,
-                    messagebox.showinfo,
-                    "Índice ARGOS",
-                    f"Índice listo: {stats['bloques']} bloques.",
-                )
-            except Exception as exc:
-                self.after(0, messagebox.showerror, "Índice ARGOS", str(exc))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._indice_pendiente = True
+        self._cola_pipeline.put({"tipo": "indice"})
+        posicion = self._cola_pipeline.qsize()
+        self.estado_chat.configure(
+            text=f"Actualización añadida a la cola. Posición: {posicion}."
+        )
 
     def _preguntar_argos(self):
         pregunta = self.pregunta_argos.get().strip()
@@ -406,5 +457,37 @@ class ArgosApp(AsistenteClasesApp):
             os.startfile(ruta)
 
 
+def _ruta_bloqueo_instancia() -> Path:
+    documentos = Path(
+        os.environ.get("USERPROFILE", str(Path.home()))
+    ) / "Documents"
+    return documentos / "Asistente de Clases" / ".argos_instancia.lock"
+
+
+def ejecutar_argos() -> int:
+    """Punto de entrada único; garantiza una sola ventana y una sola cola."""
+    bloqueo = BloqueoArchivo(
+        _ruta_bloqueo_instancia(),
+        caducidad_horas=24,
+        mensaje_ocupado=(
+            "ARGOS ya está abierto. Usa la ventana existente para mantener "
+            "una única cola de procesamiento."
+        ),
+    )
+    try:
+        with bloqueo:
+            app = ArgosApp()
+            app.mainloop()
+    except BloqueoOcupadoError as exc:
+        if os.name == "nt":
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, str(exc), "ARGOS", 0x30)
+        else:
+            print(str(exc))
+        return 2
+    return 0
+
+
 if __name__ == "__main__":
-    ArgosApp().mainloop()
+    raise SystemExit(ejecutar_argos())

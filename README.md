@@ -33,7 +33,11 @@ Reglas:
 - `transcripcion_limpia.txt` es una salida y nunca vuelve a utilizarse como entrada.
 - El pipeline, los apuntes, el índice y el chat utilizan `transcripcion_medica_revisada.txt` cuando está actualizada.
 - Cada clase genera `estado_argos.json` con el resultado de cada etapa.
-- Una cola dentro de la aplicación y un bloqueo en la carpeta impiden reprocesamientos simultáneos.
+- ARGOS admite una única instancia por usuario: una segunda apertura avisa y no crea otra cola.
+- Las clases y las reconstrucciones manuales de FTS5 pasan por la misma cola.
+- Los bloqueos distinguen la identidad del proceso, se retiran al terminar y se recuperan tras un cierre inesperado.
+- Los estados interrumpidos se registran como error visible y pueden reprocesarse.
+- Las escrituras del catálogo de la biblioteca están serializadas entre procesos.
 
 ## Búsqueda única
 

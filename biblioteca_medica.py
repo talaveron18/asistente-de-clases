@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from bloqueos import BloqueoArchivo, BloqueoOcupadoError
 from extractor_documentos import extraer_documento, guardar_extraccion
 
 
@@ -26,8 +27,53 @@ class BibliotecaMedica:
         for carpeta in (*self.carpetas.values(), self.indice_texto):
             carpeta.mkdir(parents=True, exist_ok=True)
         self.indice_path = self.raiz / "indice_biblioteca.json"
-        if not self.indice_path.exists():
-            self._guardar_indice([])
+        self._lock_path = self.raiz / ".argos_biblioteca.lock"
+        try:
+            descriptor = os.open(
+                self.indice_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as archivo:
+                json.dump([], archivo)
+        self.interrumpidos_recuperados = self._recuperar_interrumpidos()
+
+    def _bloqueo(self, esperar_segundos: float = 300) -> BloqueoArchivo:
+        return BloqueoArchivo(
+            self._lock_path,
+            caducidad_horas=6,
+            esperar_segundos=esperar_segundos,
+            mensaje_ocupado=(
+                "La biblioteca médica está siendo actualizada por otra operación."
+            ),
+        )
+
+    def _recuperar_interrumpidos(self) -> int:
+        """Marca extracciones huérfanas tras un cierre inesperado."""
+        try:
+            with self._bloqueo(esperar_segundos=0):
+                indice = self._leer_indice()
+                recuperados = 0
+                for item in indice:
+                    if item.get("estado_indice_ia") != "procesando":
+                        continue
+                    item["estado_indice_ia"] = "error"
+                    item["ultimo_error"] = (
+                        "ARGOS se cerró antes de terminar la extracción. "
+                        "El documento puede reprocesarse."
+                    )
+                    item["fecha_error"] = datetime.now().isoformat(
+                        timespec="seconds"
+                    )
+                    recuperados += 1
+                if recuperados:
+                    self._guardar_indice(indice)
+                return recuperados
+        except BloqueoOcupadoError:
+            # Hay otro proceso vivo trabajando: no se toca su estado.
+            return 0
 
     @staticmethod
     def _hash_archivo(ruta: Path) -> str:
@@ -58,66 +104,86 @@ class BibliotecaMedica:
         categoria = categoria if categoria in self.carpetas else "Otros"
 
         sha = self._hash_archivo(origen_path)
-        indice = self._leer_indice()
-        existente = next((x for x in indice if x.get("sha256") == sha), None)
-        if existente:
-            return existente, False
+        with self._bloqueo():
+            indice = self._leer_indice()
+            existente = next(
+                (x for x in indice if x.get("sha256") == sha), None
+            )
+            if existente:
+                return existente, False
 
-        destino = self.carpetas[categoria] / origen_path.name
-        contador = 2
-        while destino.exists():
-            destino = self.carpetas[categoria] / f"{origen_path.stem} ({contador}){origen_path.suffix}"
-            contador += 1
-        shutil.copy2(origen_path, destino)
+            destino = self.carpetas[categoria] / origen_path.name
+            contador = 2
+            while destino.exists():
+                destino = self.carpetas[categoria] / (
+                    f"{origen_path.stem} ({contador}){origen_path.suffix}"
+                )
+                contador += 1
+            shutil.copy2(origen_path, destino)
 
-        registro = {
-            "id": sha[:16],
-            "nombre": destino.name,
-            "categoria": categoria,
-            "extension": destino.suffix.lower(),
-            "ruta": str(destino),
-            "tamano_bytes": destino.stat().st_size,
-            "fecha_importacion": datetime.now().isoformat(timespec="seconds"),
-            "sha256": sha,
-            "estado_indice_ia": "pendiente",
-            "total_paginas": None,
-            "caracteres_extraidos": 0,
-            "requiere_ocr": False,
-            "ruta_extraccion": None,
-        }
-        indice.append(registro)
-        self._guardar_indice(indice)
-        return registro, True
+            registro = {
+                "id": sha[:16],
+                "nombre": destino.name,
+                "categoria": categoria,
+                "extension": destino.suffix.lower(),
+                "ruta": str(destino),
+                "tamano_bytes": destino.stat().st_size,
+                "fecha_importacion": datetime.now().isoformat(timespec="seconds"),
+                "sha256": sha,
+                "estado_indice_ia": "pendiente",
+                "total_paginas": None,
+                "caracteres_extraidos": 0,
+                "requiere_ocr": False,
+                "ruta_extraccion": None,
+            }
+            indice.append(registro)
+            self._guardar_indice(indice)
+            return registro, True
 
     def procesar_documento(self, item_id: str, callback=None) -> dict:
-        indice = self._leer_indice()
-        item = next((x for x in indice if x.get("id") == item_id), None)
-        if not item:
-            raise KeyError(f"Documento no encontrado: {item_id}")
+        with self._bloqueo():
+            indice = self._leer_indice()
+            item = next((x for x in indice if x.get("id") == item_id), None)
+            if not item:
+                raise KeyError(f"Documento no encontrado: {item_id}")
 
-        item["estado_indice_ia"] = "procesando"
-        self._guardar_indice(indice)
-        try:
-            resultado = extraer_documento(item["ruta"], callback)
-            destino = self.indice_texto / f"{item_id}.json"
-            guardar_extraccion(resultado, str(destino))
-            item["ruta_extraccion"] = str(destino)
-            item["total_paginas"] = resultado.get("total_paginas") or len(resultado.get("paginas", []))
-            item["caracteres_extraidos"] = resultado.get("caracteres", 0)
-            item["requiere_ocr"] = bool(resultado.get("requiere_ocr"))
-            item["estado_indice_ia"] = "requiere_ocr" if item["requiere_ocr"] else "texto_extraido"
-            item["fecha_procesado"] = datetime.now().isoformat(timespec="seconds")
-            return item
-        except Exception as exc:
-            item["estado_indice_ia"] = "error"
-            item["ultimo_error"] = str(exc)
-            raise
-        finally:
+            item["estado_indice_ia"] = "procesando"
+            item.pop("ultimo_error", None)
             self._guardar_indice(indice)
+            try:
+                resultado = extraer_documento(item["ruta"], callback)
+                destino = self.indice_texto / f"{item_id}.json"
+                guardar_extraccion(resultado, str(destino))
+                item["ruta_extraccion"] = str(destino)
+                item["total_paginas"] = resultado.get("total_paginas") or len(
+                    resultado.get("paginas", [])
+                )
+                item["caracteres_extraidos"] = resultado.get("caracteres", 0)
+                item["requiere_ocr"] = bool(resultado.get("requiere_ocr"))
+                item["estado_indice_ia"] = (
+                    "requiere_ocr" if item["requiere_ocr"] else "texto_extraido"
+                )
+                item["fecha_procesado"] = datetime.now().isoformat(
+                    timespec="seconds"
+                )
+                return item
+            except Exception as exc:
+                item["estado_indice_ia"] = "error"
+                item["ultimo_error"] = str(exc)
+                item["fecha_error"] = datetime.now().isoformat(
+                    timespec="seconds"
+                )
+                raise
+            finally:
+                self._guardar_indice(indice)
 
     def procesar_pendientes(self, callback=None) -> list[dict]:
         resultados = []
-        pendientes = [x for x in self._leer_indice() if x.get("estado_indice_ia") in {"pendiente", "error"}]
+        pendientes = [
+            x
+            for x in self._leer_indice()
+            if x.get("estado_indice_ia") in {"pendiente", "error", "procesando"}
+        ]
         total = max(1, len(pendientes))
         for i, item in enumerate(pendientes, 1):
             if callback:
@@ -139,32 +205,43 @@ class BibliotecaMedica:
         return sorted(resultados, key=lambda x: x.get("fecha_importacion", ""), reverse=True)
 
     def reindexar_archivos(self) -> list[dict]:
-        anterior = {x.get("sha256"): x for x in self._leer_indice()}
-        nuevos = []
-        for categoria, carpeta in self.carpetas.items():
-            for ruta in sorted(carpeta.rglob("*")):
-                if not ruta.is_file() or ruta.suffix.lower() not in EXTENSIONES_ADMITIDAS:
-                    continue
-                sha = self._hash_archivo(ruta)
-                previo = anterior.get(sha, {})
-                registro = {
-                    "id": sha[:16],
-                    "nombre": ruta.name,
-                    "categoria": categoria,
-                    "extension": ruta.suffix.lower(),
-                    "ruta": str(ruta),
-                    "tamano_bytes": ruta.stat().st_size,
-                    "fecha_importacion": previo.get("fecha_importacion", datetime.now().isoformat(timespec="seconds")),
-                    "sha256": sha,
-                    "estado_indice_ia": previo.get("estado_indice_ia", "pendiente"),
-                    "total_paginas": previo.get("total_paginas"),
-                    "caracteres_extraidos": previo.get("caracteres_extraidos", 0),
-                    "requiere_ocr": previo.get("requiere_ocr", False),
-                    "ruta_extraccion": previo.get("ruta_extraccion"),
-                }
-                nuevos.append(registro)
-        self._guardar_indice(nuevos)
-        return nuevos
+        with self._bloqueo():
+            anterior = {x.get("sha256"): x for x in self._leer_indice()}
+            nuevos = []
+            for categoria, carpeta in self.carpetas.items():
+                for ruta in sorted(carpeta.rglob("*")):
+                    if (
+                        not ruta.is_file()
+                        or ruta.suffix.lower() not in EXTENSIONES_ADMITIDAS
+                    ):
+                        continue
+                    sha = self._hash_archivo(ruta)
+                    previo = anterior.get(sha, {})
+                    registro = {
+                        "id": sha[:16],
+                        "nombre": ruta.name,
+                        "categoria": categoria,
+                        "extension": ruta.suffix.lower(),
+                        "ruta": str(ruta),
+                        "tamano_bytes": ruta.stat().st_size,
+                        "fecha_importacion": previo.get(
+                            "fecha_importacion",
+                            datetime.now().isoformat(timespec="seconds"),
+                        ),
+                        "sha256": sha,
+                        "estado_indice_ia": previo.get(
+                            "estado_indice_ia", "pendiente"
+                        ),
+                        "total_paginas": previo.get("total_paginas"),
+                        "caracteres_extraidos": previo.get(
+                            "caracteres_extraidos", 0
+                        ),
+                        "requiere_ocr": previo.get("requiere_ocr", False),
+                        "ruta_extraccion": previo.get("ruta_extraccion"),
+                    }
+                    nuevos.append(registro)
+            self._guardar_indice(nuevos)
+            return nuevos
 
     def abrir_raiz(self) -> None:
         os.startfile(self.raiz)

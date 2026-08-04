@@ -63,16 +63,44 @@ jobs:
             throw "El ffmpeg.exe empaquetado no se puede ejecutar"
           }
 
-      - name: Comprobar apertura del ejecutable construido
+      - name: Comprobar apertura y carga real del modelo
         shell: pwsh
         run: |
+          $configDir = Join-Path $env:LOCALAPPDATA "AsistenteDeClases"
+          New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+          @{
+            hf_token = ""
+            whisper_model = "tiny"
+            idioma = "es"
+            sample_rate = 16000
+            min_hablantes = 2
+            max_hablantes = 10
+            usar_gpu = $false
+            ultima_materia = ""
+          } | ConvertTo-Json | Set-Content `
+            -Path (Join-Path $configDir "config.json") -Encoding utf8
+          $env:ARGOS_READY_FILE = Join-Path $env:RUNNER_TEMP "argos-ready-build.json"
+          Remove-Item $env:ARGOS_READY_FILE -Force -ErrorAction SilentlyContinue
           $proceso = Start-Process "dist\ARGOS\ARGOS.exe" -PassThru
           $null = $proceso.WaitForInputIdle(15000)
-          Start-Sleep -Seconds 3
-          $proceso.Refresh()
-          if ($proceso.HasExited) {
-            throw "ARGOS.exe se cerró durante la prueba de apertura"
+          $limite = (Get-Date).AddMinutes(8)
+          while (-not (Test-Path $env:ARGOS_READY_FILE) -and (Get-Date) -lt $limite) {
+            Start-Sleep -Seconds 2
+            $proceso.Refresh()
+            if ($proceso.HasExited) {
+              throw "ARGOS.exe se cerró antes de cargar Faster-Whisper"
+            }
           }
+          if (-not (Test-Path $env:ARGOS_READY_FILE)) {
+            Stop-Process -Id $proceso.Id -Force -ErrorAction SilentlyContinue
+            throw "Faster-Whisper no terminó de cargar en ocho minutos"
+          }
+          $resultado = Get-Content $env:ARGOS_READY_FILE -Raw | ConvertFrom-Json
+          if (-not $resultado.modelos_cargados) {
+            Stop-Process -Id $proceso.Id -Force -ErrorAction SilentlyContinue
+            throw "La carga empaquetada de Faster-Whisper falló: $($resultado.detalle)"
+          }
+          $proceso.Refresh()
           if ($proceso.MainWindowTitle -notmatch "^ARGOS") {
             throw "ARGOS.exe no mostró su ventana principal"
           }
@@ -115,13 +143,28 @@ jobs:
           if (-not (Test-Path $acceso)) {
             throw "No se creó el acceso directo del menú Inicio"
           }
+          $env:ARGOS_READY_FILE = Join-Path $env:RUNNER_TEMP "argos-ready-installed.json"
+          Remove-Item $env:ARGOS_READY_FILE -Force -ErrorAction SilentlyContinue
           $proceso = Start-Process "$destino\ARGOS.exe" -PassThru
           $null = $proceso.WaitForInputIdle(15000)
-          Start-Sleep -Seconds 3
-          $proceso.Refresh()
-          if ($proceso.HasExited) {
-            throw "ARGOS instalado se cerró durante la prueba de apertura"
+          $limite = (Get-Date).AddMinutes(4)
+          while (-not (Test-Path $env:ARGOS_READY_FILE) -and (Get-Date) -lt $limite) {
+            Start-Sleep -Seconds 2
+            $proceso.Refresh()
+            if ($proceso.HasExited) {
+              throw "ARGOS instalado se cerró antes de cargar Faster-Whisper"
+            }
           }
+          if (-not (Test-Path $env:ARGOS_READY_FILE)) {
+            Stop-Process -Id $proceso.Id -Force -ErrorAction SilentlyContinue
+            throw "El ARGOS instalado no terminó de cargar Faster-Whisper"
+          }
+          $resultado = Get-Content $env:ARGOS_READY_FILE -Raw | ConvertFrom-Json
+          if (-not $resultado.modelos_cargados) {
+            Stop-Process -Id $proceso.Id -Force -ErrorAction SilentlyContinue
+            throw "Faster-Whisper falló tras instalar: $($resultado.detalle)"
+          }
+          $proceso.Refresh()
           if ($proceso.MainWindowTitle -notmatch "^ARGOS") {
             throw "ARGOS instalado no mostró su ventana principal"
           }

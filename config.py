@@ -7,12 +7,12 @@ import tempfile
 from pathlib import Path
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AsistenteDeClases"
-APP_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_FILE = APP_DIR / "config.json"
 
 
 class Config:
     def __init__(self):
+        APP_DIR.mkdir(parents=True, exist_ok=True)
         self.hf_token = ""
         self.whisper_model = "small"
         self.idioma = "es"

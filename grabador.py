@@ -8,7 +8,13 @@ import wave
 from typing import Callable, Optional
 
 import numpy as np
-import sounddevice as sd
+
+
+def _sounddevice():
+    """Carga PortAudio solo cuando se consulta o utiliza el micrófono."""
+    import sounddevice
+
+    return sounddevice
 
 
 class GrabadorAudio:
@@ -30,6 +36,7 @@ class GrabadorAudio:
     def listar_dispositivos():
         dispositivos = []
         try:
+            sd = _sounddevice()
             for i, dev in enumerate(sd.query_devices()):
                 if dev["max_input_channels"] > 0:
                     dispositivos.append((i, dev["name"]))
@@ -50,6 +57,7 @@ class GrabadorAudio:
         os.makedirs(os.path.dirname(self._archivo_salida), exist_ok=True)
 
         try:
+            sd = _sounddevice()
             self._wav = wave.open(self._archivo_salida, "wb")
             self._wav.setnchannels(1)
             self._wav.setsampwidth(2)

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
-import socket
-import time
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from bloqueos import BloqueoArchivo, BloqueoOcupadoError
 from correccion_medica import corregir_archivo_transcripcion
 from enriquecedor_argos import enriquecer_clase_con_fuentes
 from indice_sqlite import IndiceConocimientoSQLite
@@ -27,118 +24,23 @@ class _BloqueoClase:
 
     def __init__(self, carpeta: Path, caducidad_horas: int = 6):
         self.ruta = carpeta / ".argos_procesando.lock"
-        self.caducidad = caducidad_horas * 3600
-        self._descriptor: int | None = None
-        self._token: str | None = None
-
-    @staticmethod
-    def _pid_activo(pid: int) -> bool:
-        if pid <= 0:
-            return False
-        if pid == os.getpid():
-            return True
-        if os.name != "nt":
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return False
-            except PermissionError:
-                return True
-            except OSError:
-                return False
-            return True
-
-        # En Windows OpenProcess permite comprobar existencia sin terminar ni
-        # señalizar el proceso. Acceso denegado significa que el PID existe.
-        import ctypes
-
-        process_query_limited_information = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(
-            process_query_limited_information, False, pid
+        self._bloqueo = BloqueoArchivo(
+            self.ruta,
+            caducidad_horas=caducidad_horas,
+            mensaje_ocupado=(
+                "Esta clase ya está siendo procesada por otra ventana de ARGOS."
+            ),
         )
-        if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        return ctypes.windll.kernel32.GetLastError() != 87  # PID inexistente
-
-    def _es_obsoleto(self) -> bool:
-        try:
-            antiguedad = max(0.0, time.time() - self.ruta.stat().st_mtime)
-        except OSError:
-            return False
-        try:
-            datos = json.loads(self.ruta.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            # Un proceso puede caer entre O_EXCL y la escritura. El margen
-            # evita retirar un fichero que todavía se está inicializando.
-            return antiguedad > 60
-
-        host = str(datos.get("host") or "")
-        try:
-            pid = int(datos.get("pid"))
-        except (TypeError, ValueError):
-            pid = 0
-        if not host or host == socket.gethostname():
-            return not self._pid_activo(pid)
-        return antiguedad > self.caducidad
 
     def __enter__(self):
-        for intento in range(2):
-            try:
-                self._descriptor = os.open(
-                    self.ruta,
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                )
-                self._token = uuid.uuid4().hex
-                contenido = json.dumps(
-                    {
-                        "pid": os.getpid(),
-                        "host": socket.gethostname(),
-                        "inicio": datetime.now().isoformat(timespec="seconds"),
-                        "token": self._token,
-                    },
-                    ensure_ascii=False,
-                ).encode("utf-8")
-                os.write(self._descriptor, contenido)
-                os.fsync(self._descriptor)
-                return self
-            except FileExistsError as exc:
-                if intento == 0 and self._es_obsoleto():
-                    try:
-                        self.ruta.unlink()
-                    except OSError:
-                        pass
-                    continue
-                raise ClaseEnProcesoError(
-                    "Esta clase ya está siendo procesada por otra ventana de ARGOS."
-                ) from exc
-            except Exception:
-                if self._descriptor is not None:
-                    try:
-                        os.close(self._descriptor)
-                    except OSError:
-                        pass
-                    self._descriptor = None
-                try:
-                    self.ruta.unlink()
-                except OSError:
-                    pass
-                raise
-        raise ClaseEnProcesoError("No se pudo bloquear la clase.")
+        try:
+            self._bloqueo.__enter__()
+            return self
+        except BloqueoOcupadoError as exc:
+            raise ClaseEnProcesoError(str(exc)) from exc
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self._descriptor is not None:
-            try:
-                os.close(self._descriptor)
-            except OSError:
-                pass
-            self._descriptor = None
-        try:
-            datos = json.loads(self.ruta.read_text(encoding="utf-8"))
-            if datos.get("token") == self._token:
-                self.ruta.unlink()
-        except (OSError, json.JSONDecodeError):
-            pass
+        return self._bloqueo.__exit__(exc_type, exc_value, traceback)
 
 
 class OrquestadorArgos:
@@ -155,6 +57,47 @@ class OrquestadorArgos:
     def __init__(self, indice: IndiceConocimientoSQLite):
         self.indice = indice
 
+    def recuperar_interrumpidos(self, raiz: str | Path | None = None) -> int:
+        """Convierte estados huérfanos en errores visibles y reprocesables."""
+        raiz = Path(raiz) if raiz else self.indice.raiz
+        recuperados = 0
+        for estado_path in raiz.rglob("estado_argos.json"):
+            if "Biblioteca médica" in estado_path.parts:
+                continue
+            carpeta = estado_path.parent
+            try:
+                estado = json.loads(estado_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if estado.get("estado") != "procesando":
+                continue
+            bloqueo = BloqueoArchivo(carpeta / ".argos_procesando.lock")
+            if bloqueo.esta_activo():
+                continue
+            ahora = datetime.now().isoformat(timespec="seconds")
+            error = {
+                "tipo": "ProcesamientoInterrumpido",
+                "mensaje": (
+                    "ARGOS se cerró antes de terminar. La clase puede "
+                    "reprocesarse con seguridad."
+                ),
+            }
+            estado["estado"] = "error"
+            estado["fin"] = ahora
+            estado["error"] = error
+            for paso in estado.get("pasos", []):
+                if paso.get("estado") == "procesando":
+                    paso["estado"] = "error"
+                    paso["fin"] = ahora
+                    paso["error"] = error
+            self._guardar_estado(carpeta, estado)
+            try:
+                (carpeta / ".argos_procesando.lock").unlink()
+            except OSError:
+                pass
+            recuperados += 1
+        return recuperados
+
     def procesar_clase(
         self,
         carpeta: str | Path,
@@ -163,6 +106,10 @@ class OrquestadorArgos:
         carpeta = Path(carpeta)
         if not carpeta.is_dir():
             raise FileNotFoundError(carpeta)
+
+        # Si la ejecución anterior terminó de forma abrupta, deja primero un
+        # diagnóstico persistente antes de iniciar el reprocesamiento limpio.
+        self.recuperar_interrumpidos(carpeta)
 
         estado = {
             "version": 1,
@@ -210,7 +157,16 @@ class OrquestadorArgos:
                     "indice_fts5",
                     "Actualizando el índice único...",
                     0.75,
-                    lambda _carpeta: self.indice.reconstruir(),
+                    lambda _carpeta: self.indice.reconstruir(
+                        callback=(
+                            (lambda mensaje, valor: callback(
+                                mensaje,
+                                0.75 + (0.14 * valor),
+                            ))
+                            if callback
+                            else None
+                        )
+                    ),
                     callback,
                 )
                 enriquecido = self._paso(

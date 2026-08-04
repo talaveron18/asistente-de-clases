@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -35,6 +37,11 @@ class AsistenteClasesApp(ctk.CTk):
         self._grabando_desde = 0.0
 
         self._crear_interfaz()
+        if self.biblioteca_medica.interrumpidos_recuperados:
+            total = self.biblioteca_medica.interrumpidos_recuperados
+            self.estado_documentos.configure(
+                text=f"{total} extracción interrumpida marcada para reintento"
+            )
         self._cargar_modelos()
 
     def _crear_interfaz(self):
@@ -479,16 +486,35 @@ class AsistenteClasesApp(ctk.CTk):
                 )
                 self.after(0, self.estado_modelos.configure, {"text": texto, "text_color": "#4caf50"})
                 self.after(0, self.estado.configure, {"text": "Listo para grabar o transcribir."})
+                self._registrar_resultado_modelos(True, texto)
             except Exception as exc:
                 self.after(0, self.estado_modelos.configure, {"text": "Error", "text_color": "#ef5350"})
                 self.after(0, self.estado.configure, {"text": str(exc)})
+                self._registrar_resultado_modelos(False, str(exc))
         threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _registrar_resultado_modelos(exito: bool, detalle: str) -> None:
+        """Expone al smoke test de Windows el resultado real de la carga."""
+        destino = os.environ.get("ARGOS_READY_FILE", "").strip()
+        if not destino:
+            return
+        ruta = Path(destino)
+        temporal = ruta.with_suffix(ruta.suffix + ".tmp")
+        try:
+            ruta.parent.mkdir(parents=True, exist_ok=True)
+            temporal.write_text(
+                json.dumps(
+                    {"modelos_cargados": exito, "detalle": detalle},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            temporal.replace(ruta)
+        except OSError:
+            pass
 
     def _cerrar(self):
         if self.grabador and self.grabador.esta_grabando():
             self.grabador.detener()
         self.destroy()
-
-
-if __name__ == "__main__":
-    AsistenteClasesApp().mainloop()

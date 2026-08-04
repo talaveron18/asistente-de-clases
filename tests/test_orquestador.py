@@ -50,6 +50,7 @@ def test_orquestador_ejecuta_una_sola_cadena_y_registra_estado(tmp_path):
     assert resultado["preguntas"] == 1
     assert resultado["avisos"] == 1
     assert progreso[-1][1] == 1.0
+    assert any(0.75 < valor <= 0.89 for _mensaje, valor in progreso)
 
     estado = json.loads((clase / "estado_argos.json").read_text(encoding="utf-8"))
     assert estado["estado"] == "completado"
