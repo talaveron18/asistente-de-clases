@@ -1,11 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
-import imageio_ffmpeg
+from pathlib import Path
+import shutil
 
-ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+import imageio_ffmpeg
+from PyInstaller.utils.hooks import collect_all
+
+# imageio-ffmpeg distribuye nombres versionados. ARGOS busca explícitamente
+# ffmpeg.exe, por lo que se crea una copia estable antes de empaquetar.
+vendor_dir = Path("build_vendor")
+vendor_dir.mkdir(parents=True, exist_ok=True)
+ffmpeg_bundled = vendor_dir / "ffmpeg.exe"
+shutil.copy2(imageio_ffmpeg.get_ffmpeg_exe(), ffmpeg_bundled)
 
 datas = []
-binaries = [(ffmpeg_exe, ".")]
+binaries = [(str(ffmpeg_bundled), ".")]
 hiddenimports = ["pypdf", "docx", "sounddevice"]
 
 for paquete in (
