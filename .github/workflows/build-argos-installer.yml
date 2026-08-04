@@ -4,14 +4,12 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ['v*']
     paths:
       - '**.py'
       - 'requirements-installer.txt'
       - 'installer/**'
       - '.github/workflows/build-argos-installer.yml'
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: write
@@ -38,7 +36,6 @@ jobs:
       - name: Compilar aplicación
         shell: pwsh
         run: |
-          $ctk = python -c "import customtkinter,os; print(os.path.dirname(customtkinter.__file__))"
           pyinstaller --noconfirm --clean --windowed --onedir `
             --name ARGOS `
             --collect-all customtkinter `
