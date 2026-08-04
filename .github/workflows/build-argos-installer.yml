@@ -1,0 +1,77 @@
+name: Construir ARGOS Setup
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '**.py'
+      - 'requirements-installer.txt'
+      - 'installer/**'
+      - '.github/workflows/build-argos-installer.yml'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-installer.txt
+
+      - name: Compilar aplicación
+        shell: pwsh
+        run: |
+          $ctk = python -c "import customtkinter,os; print(os.path.dirname(customtkinter.__file__))"
+          pyinstaller --noconfirm --clean --windowed --onedir `
+            --name ARGOS `
+            --collect-all customtkinter `
+            --collect-all faster_whisper `
+            --collect-all ctranslate2 `
+            --collect-all tokenizers `
+            --collect-all av `
+            --collect-all imageio_ffmpeg `
+            --hidden-import pypdf `
+            --hidden-import docx `
+            --hidden-import sounddevice `
+            main_v5.py
+
+      - name: Instalar Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Crear Setup.exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path output | Out-Null
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\argos.iss
+
+      - name: Publicar artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARGOS-Setup
+          path: output/ARGOS-Setup.exe
+          if-no-files-found: error
+
+      - name: Publicar Release para etiquetas
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/ARGOS-Setup.exe
+          generate_release_notes: true
