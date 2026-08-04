@@ -464,6 +464,15 @@ def _ruta_bloqueo_instancia() -> Path:
     return documentos / "Asistente de Clases" / ".argos_instancia.lock"
 
 
+def _mostrar_aviso_instancia(mensaje: str) -> None:
+    if os.name == "nt":
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, mensaje, "ARGOS", 0x30)
+    else:
+        print(mensaje)
+
+
 def ejecutar_argos() -> int:
     """Punto de entrada único; garantiza una sola ventana y una sola cola."""
     bloqueo = BloqueoArchivo(
@@ -479,12 +488,7 @@ def ejecutar_argos() -> int:
             app = ArgosApp()
             app.mainloop()
     except BloqueoOcupadoError as exc:
-        if os.name == "nt":
-            import ctypes
-
-            ctypes.windll.user32.MessageBoxW(None, str(exc), "ARGOS", 0x30)
-        else:
-            print(str(exc))
+        _mostrar_aviso_instancia(str(exc))
         return 2
     return 0
 

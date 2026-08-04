@@ -161,6 +161,8 @@ def test_pid_reutilizado_no_mantiene_un_bloqueo(tmp_path, monkeypatch):
 def test_segunda_ventana_no_crea_otra_cola(tmp_path, monkeypatch):
     ruta_lock = tmp_path / ".argos_instancia.lock"
     monkeypatch.setattr(argos_app, "_ruta_bloqueo_instancia", lambda: ruta_lock)
+    avisos = []
+    monkeypatch.setattr(argos_app, "_mostrar_aviso_instancia", avisos.append)
     creadas = []
 
     class AppFalsa:
@@ -174,6 +176,7 @@ def test_segunda_ventana_no_crea_otra_cola(tmp_path, monkeypatch):
     with BloqueoArchivo(ruta_lock):
         assert argos_app.ejecutar_argos() == 2
     assert creadas == []
+    assert avisos and "ya está abierto" in avisos[0]
 
     assert argos_app.ejecutar_argos() == 0
     assert len(creadas) == 1
