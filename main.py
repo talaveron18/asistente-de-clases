@@ -39,6 +39,7 @@ class AsistenteClasesApp(ctk.CTk):
         self._carpeta_grabacion = None
         self._transcripcion_incremental = None
         self._dispositivo_entrada = None
+        self._dispositivos_entrada = []
         self._deteniendo_grabacion = False
         self._cerrando = False
         self._recuperacion_grabaciones_activa = False
@@ -118,9 +119,15 @@ class AsistenteClasesApp(ctk.CTk):
         self.btn_detener.pack(side="left")
         self.reloj = ctk.CTkLabel(controles, text="00:00:00", font=ctk.CTkFont(size=20, weight="bold"))
         self.reloj.pack(side="right")
-        self.nivel = ctk.CTkProgressBar(self.tab_grabar)
-        self.nivel.pack(fill="x", padx=14, pady=12)
+        fila_nivel = ctk.CTkFrame(self.tab_grabar, fg_color="transparent")
+        fila_nivel.pack(fill="x", padx=14, pady=12)
+        self.nivel = ctk.CTkProgressBar(fila_nivel)
+        self.nivel.pack(side="left", fill="x", expand=True)
         self.nivel.set(0)
+        self.etiqueta_nivel = ctk.CTkLabel(
+            fila_nivel, text="Señal: 0 %", width=100, anchor="e"
+        )
+        self.etiqueta_nivel.pack(side="right", padx=(10, 0))
         self.progreso_grabar = ctk.CTkProgressBar(self.tab_grabar)
         self.progreso_grabar.pack(fill="x", padx=14, pady=(0, 10))
         self.progreso_grabar.set(0)
@@ -360,21 +367,24 @@ class AsistenteClasesApp(ctk.CTk):
 
     def _detectar_hardware_audio(self, mostrar_error: bool = False):
         try:
-            dispositivo = GrabadorAudio.detectar_dispositivo_entrada(
+            dispositivos = GrabadorAudio.detectar_dispositivos_entrada(
                 self.config_obj.sample_rate,
                 self.config_obj.dispositivo_audio,
             )
+            dispositivo = dispositivos[0]
+            self._dispositivos_entrada = dispositivos
             self._dispositivo_entrada = dispositivo
             if hasattr(self, "etiqueta_micro"):
                 self.etiqueta_micro.configure(
                     text=(
                         f"{dispositivo.nombre} · {dispositivo.sample_rate} Hz "
-                        "· seleccionado por ARGOS"
+                        f"· {dispositivo.canales} canal(es) · selección automática"
                     ),
                     text_color="#4caf50",
                 )
             return dispositivo
         except Exception as exc:
+            self._dispositivos_entrada = []
             self._dispositivo_entrada = None
             if hasattr(self, "etiqueta_micro"):
                 self.etiqueta_micro.configure(
@@ -407,24 +417,6 @@ class AsistenteClasesApp(ctk.CTk):
             messagebox.showerror("Grabación", f"No se pudo preparar la clase: {exc}")
             return
 
-        self.grabador = GrabadorAudio(
-            dispositivo.sample_rate, dispositivo.indice
-        )
-        ok = self.grabador.iniciar(
-            lambda n: self._enviar_ui(self.nivel.set, n),
-            str(carpeta / "audio.wav"),
-            str(carpeta / "fragmentos_audio"),
-            lambda fragmento: self._transcripcion_incremental.encolar(fragmento),
-            duracion_fragmento=10.0,
-        )
-        if not ok:
-            self.repositorio.marcar_estado_grabacion(
-                carpeta,
-                "error",
-                self.grabador.ultimo_error or "No se pudo abrir el micrófono.",
-            )
-            messagebox.showerror("Audio", self.grabador.ultimo_error or "No se pudo iniciar la grabación.")
-            return
         self._carpeta_grabacion = carpeta
         self._transcripcion_incremental = TranscripcionIncremental(
             self.transcriptor,
@@ -437,6 +429,29 @@ class AsistenteClasesApp(ctk.CTk):
                 self.estado.configure, {"text": mensaje}
             ),
         )
+        self.grabador = GrabadorAudio(dispositivo.sample_rate, dispositivo.indice)
+        ok = self.grabador.iniciar(
+            lambda n: self._enviar_ui(self._actualizar_nivel_audio, n),
+            str(carpeta / "audio.wav"),
+            str(carpeta / "fragmentos_audio"),
+            lambda fragmento: self._transcripcion_incremental.encolar(fragmento),
+            candidatos_entrada=self._dispositivos_entrada,
+            callback_dispositivo=lambda entrada, motivo: self._enviar_ui(
+                self._actualizar_dispositivo_grabacion, entrada, motivo
+            ),
+            duracion_fragmento=10.0,
+        )
+        if not ok:
+            self._transcripcion_incremental.cerrar_sin_esperar()
+            self._transcripcion_incremental = None
+            self._carpeta_grabacion = None
+            self.repositorio.marcar_estado_grabacion(
+                carpeta,
+                "error",
+                self.grabador.ultimo_error or "No se pudo abrir el micrófono.",
+            )
+            messagebox.showerror("Audio", self.grabador.ultimo_error or "No se pudo iniciar la grabación.")
+            return
         self.config_obj.dispositivo_audio = str(dispositivo.indice)
         self.config_obj.sample_rate = dispositivo.sample_rate
         self.config_obj.ultima_materia = materia
@@ -454,6 +469,35 @@ class AsistenteClasesApp(ctk.CTk):
             text=f"Grabando con {dispositivo.nombre}; audio protegido en {carpeta.name}."
         )
         self._actualizar_reloj()
+
+    def _actualizar_nivel_audio(self, nivel: float) -> None:
+        self.nivel.set(nivel)
+        if hasattr(self, "etiqueta_nivel"):
+            self.etiqueta_nivel.configure(text=f"Señal: {nivel * 100:.1f} %")
+
+    def _actualizar_dispositivo_grabacion(self, entrada, motivo: str) -> None:
+        detalle_host = f" · {entrada.hostapi}" if entrada.hostapi else ""
+        self.etiqueta_micro.configure(
+            text=(
+                f"{entrada.nombre} · {entrada.sample_rate} Hz · "
+                f"{entrada.canales} canal(es){detalle_host}"
+            ),
+            text_color="#4caf50" if motivo != "sin_senal" else "#ef5350",
+        )
+        if motivo == "cambio_automatico":
+            self.estado.configure(
+                text=(
+                    "La primera ruta no entregó señal; ARGOS ha cambiado "
+                    f"automáticamente a {entrada.nombre}. Habla para verificarla."
+                )
+            )
+        elif motivo == "sin_senal":
+            self.estado.configure(
+                text=(
+                    "Windows no entrega señal por ninguna entrada compatible. "
+                    "Revisa Privacidad > Micrófono y que el micrófono no esté silenciado."
+                )
+            )
 
     def _actualizar_reloj(self):
         if not self.grabador or not self.grabador.esta_grabando():
@@ -576,6 +620,8 @@ class AsistenteClasesApp(ctk.CTk):
         self.btn_grabar.configure(state="normal")
         self.btn_detener.configure(state="disabled", text="Detener y guardar")
         self.nivel.set(0)
+        if hasattr(self, "etiqueta_nivel"):
+            self.etiqueta_nivel.configure(text="Señal: 0 %")
         self._deteniendo_grabacion = False
         self._carpeta_grabacion = None
         self._transcripcion_incremental = None

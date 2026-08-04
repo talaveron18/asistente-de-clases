@@ -8,7 +8,12 @@ from pathlib import Path
 import numpy as np
 
 import grabador as modulo_grabador
-from grabador import FragmentoAudio, GrabadorAudio, recuperar_audio_interrumpido
+from grabador import (
+    DispositivoEntrada,
+    FragmentoAudio,
+    GrabadorAudio,
+    recuperar_audio_interrumpido,
+)
 from repositorio import RepositorioClases
 from transcripcion_incremental import TranscripcionIncremental
 from transcriptor import SegmentoTranscrito
@@ -134,6 +139,98 @@ def test_grabador_persiste_fragmentos_sin_bloquear_callback(
         assert archivo.getnframes() == 10
     with wave.open(str(tmp_path / "audio.wav"), "rb") as archivo:
         assert archivo.getnframes() == 10
+
+
+def test_grabador_usa_el_canal_multicanal_que_contiene_voz(tmp_path, monkeypatch):
+    class StreamFalso:
+        def __init__(self, callback, channels, **_kwargs):
+            assert channels == 2
+            self.callback = callback
+
+        def start(self):
+            entrada = np.column_stack(
+                (
+                    np.zeros(10, dtype=np.int16),
+                    np.full(10, 2400, dtype=np.int16),
+                )
+            )
+            self.callback(entrada, 10, None, None)
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    class SoundDeviceFalso:
+        InputStream = StreamFalso
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+    entrada = DispositivoEntrada(7, "Microphone Array", 10, 2, "WASAPI")
+    grabador = GrabadorAudio(sample_rate=10, dispositivo=7)
+
+    assert grabador.iniciar(
+        archivo_salida=str(tmp_path / "audio.wav"),
+        candidatos_entrada=[entrada],
+        duracion_fragmento=1,
+    )
+    grabador.detener()
+
+    with wave.open(str(tmp_path / "audio.wav"), "rb") as archivo:
+        muestras = np.frombuffer(archivo.readframes(10), dtype=np.int16)
+    assert muestras.tolist() == [2400] * 10
+    assert grabador.nivel_maximo > 0.002
+
+
+def test_grabador_cambia_automaticamente_si_la_primera_ruta_esta_muda(
+    tmp_path, monkeypatch
+):
+    cambios = []
+    hay_senal = threading.Event()
+
+    class StreamFalso:
+        def __init__(self, callback, device, **_kwargs):
+            self.callback = callback
+            self.device = device
+
+        def start(self):
+            amplitud = 0 if self.device == 1 else 2200
+            self.callback(
+                np.full((10, 1), amplitud, dtype=np.int16), 10, None, None
+            )
+            if amplitud:
+                hay_senal.set()
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    class SoundDeviceFalso:
+        InputStream = StreamFalso
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+    entradas = [
+        DispositivoEntrada(1, "Micrófono MME", 10, 1, "MME"),
+        DispositivoEntrada(2, "Micrófono WASAPI", 10, 1, "WASAPI"),
+    ]
+    grabador = GrabadorAudio(sample_rate=10, dispositivo=1)
+
+    assert grabador.iniciar(
+        archivo_salida=str(tmp_path / "audio.wav"),
+        candidatos_entrada=entradas,
+        callback_dispositivo=lambda entrada, motivo: cambios.append(
+            (entrada.indice, motivo)
+        ),
+        segundos_sin_senal=0.25,
+    )
+    assert hay_senal.wait(timeout=2)
+    grabador.detener()
+
+    assert grabador.dispositivo == 2
+    assert (2, "cambio_automatico") in cambios
+    assert grabador.nivel_maximo > 0.002
 
 
 def test_transcripcion_se_guarda_antes_de_detener(tmp_path):
