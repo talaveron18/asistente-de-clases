@@ -11,6 +11,12 @@ config.json
 *.flac
 outputs/
 models/
+build/
+dist/
+build_vendor/
+release/
+installer_output/
+*.spec.bak
 .DS_Store
 Thumbs.db
 .vscode/
