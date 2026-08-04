@@ -88,6 +88,11 @@ También puede utilizarse `EJECUTAR.bat`.
 ## Funciones actuales
 
 - Grabación directa a WAV sin acumular la clase completa en memoria.
+- Detección automática del micrófono físico y de su frecuencia compatible.
+- Transcripción incremental cada pocos segundos con guardado atómico durante
+  la grabación; no espera al final de la clase.
+- Fragmentos de audio recuperables y reanudación automática tras un cierre
+  inesperado, sin duplicar lo ya transcrito.
 - Faster-Whisper con GPU opcional y retorno a CPU.
 - Diarización opcional mediante Pyannote cuando se instala y configura.
 - Importación de audio y vídeo largo.

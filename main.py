@@ -11,10 +11,11 @@ import customtkinter as ctk
 
 from biblioteca_medica import BibliotecaMedica, CATEGORIAS
 from config import Config
-from grabador import GrabadorAudio
+from grabador import GrabadorAudio, recuperar_audio_interrumpido
 from media_utils import eliminar_temporal, preparar_para_transcripcion, tipo_archivo
 from repositorio import RepositorioClases
 from transcriptor import TranscriptorClases
+from transcripcion_incremental import ResultadoGrabacion, TranscripcionIncremental
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -35,6 +36,12 @@ class AsistenteClasesApp(ctk.CTk):
         self.grabador = None
         self.ruta_archivo = ""
         self._grabando_desde = 0.0
+        self._carpeta_grabacion = None
+        self._transcripcion_incremental = None
+        self._dispositivo_entrada = None
+        self._deteniendo_grabacion = False
+        self._cerrando = False
+        self._recuperacion_grabaciones_activa = False
 
         self._crear_interfaz()
         if self.biblioteca_medica.interrumpidos_recuperados:
@@ -89,12 +96,14 @@ class AsistenteClasesApp(ctk.CTk):
         self.materia_grabar, self.titulo_grabar = self._campos_clase(self.tab_grabar)
         panel = ctk.CTkFrame(self.tab_grabar)
         panel.pack(fill="x", padx=14, pady=(0, 10))
-        ctk.CTkLabel(panel, text="Micrófono:").pack(side="left", padx=(12, 6), pady=12)
-        self.combo_micro = ctk.CTkComboBox(panel, width=430)
-        self.combo_micro.pack(side="left", padx=6)
-        valores = [f"{i}: {nombre}" for i, nombre in GrabadorAudio.listar_dispositivos()] or ["Sin dispositivos detectados"]
-        self.combo_micro.configure(values=valores)
-        self.combo_micro.set(valores[0])
+        ctk.CTkLabel(panel, text="Entrada automática:").pack(
+            side="left", padx=(12, 6), pady=12
+        )
+        self.etiqueta_micro = ctk.CTkLabel(
+            panel, text="Detectando hardware de audio…", anchor="w"
+        )
+        self.etiqueta_micro.pack(side="left", fill="x", expand=True, padx=6)
+        self._detectar_hardware_audio()
 
         controles = ctk.CTkFrame(self.tab_grabar, fg_color="transparent")
         controles.pack(fill="x", padx=14)
@@ -103,7 +112,7 @@ class AsistenteClasesApp(ctk.CTk):
         )
         self.btn_grabar.pack(side="left", padx=(0, 8))
         self.btn_detener = ctk.CTkButton(
-            controles, text="Detener, transcribir y guardar",
+            controles, text="Detener y guardar",
             command=self._detener_grabacion, state="disabled", fg_color="#2e7d32"
         )
         self.btn_detener.pack(side="left")
@@ -117,6 +126,15 @@ class AsistenteClasesApp(ctk.CTk):
         self.progreso_grabar.set(0)
         self.texto_grabar = ctk.CTkTextbox(self.tab_grabar, font=ctk.CTkFont(size=13))
         self.texto_grabar.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        ctk.CTkLabel(
+            self.tab_grabar,
+            text=(
+                "El audio se guarda continuamente y la transcripción se actualiza "
+                "automáticamente durante la grabación."
+            ),
+            text_color="#aaaaaa",
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(0, 8))
 
     def _tab_archivo_multimedia(self):
         self.materia_archivo, self.titulo_archivo = self._campos_clase(self.tab_archivo)
@@ -340,30 +358,101 @@ class AsistenteClasesApp(ctk.CTk):
             return None
         return m, t
 
-    def _indice_microfono(self):
+    def _detectar_hardware_audio(self, mostrar_error: bool = False):
         try:
-            return int(self.combo_micro.get().split(":", 1)[0])
-        except (ValueError, IndexError):
+            dispositivo = GrabadorAudio.detectar_dispositivo_entrada(
+                self.config_obj.sample_rate,
+                self.config_obj.dispositivo_audio,
+            )
+            self._dispositivo_entrada = dispositivo
+            if hasattr(self, "etiqueta_micro"):
+                self.etiqueta_micro.configure(
+                    text=(
+                        f"{dispositivo.nombre} · {dispositivo.sample_rate} Hz "
+                        "· seleccionado por ARGOS"
+                    ),
+                    text_color="#4caf50",
+                )
+            return dispositivo
+        except Exception as exc:
+            self._dispositivo_entrada = None
+            if hasattr(self, "etiqueta_micro"):
+                self.etiqueta_micro.configure(
+                    text="No se encontró una entrada de audio utilizable",
+                    text_color="#ef5350",
+                )
+            if mostrar_error:
+                messagebox.showerror("Hardware de audio", str(exc))
             return None
 
     def _iniciar_grabacion(self):
-        if not self._datos_clase(self.materia_grabar, self.titulo_grabar):
+        datos = self._datos_clase(self.materia_grabar, self.titulo_grabar)
+        if not datos:
             return
         if not self.transcriptor or not self.transcriptor.modelos_cargados:
             messagebox.showwarning("Modelos", "Los modelos todavía no están listos.")
             return
-        self.grabador = GrabadorAudio(self.config_obj.sample_rate, self._indice_microfono())
+        dispositivo = self._detectar_hardware_audio(mostrar_error=True)
+        if not dispositivo:
+            return
+        materia, titulo = datos
+        try:
+            carpeta = self.repositorio.iniciar_grabacion(
+                materia,
+                titulo,
+                dispositivo.sample_rate,
+                f"{dispositivo.indice}: {dispositivo.nombre}",
+            )
+        except Exception as exc:
+            messagebox.showerror("Grabación", f"No se pudo preparar la clase: {exc}")
+            return
+
+        self.grabador = GrabadorAudio(
+            dispositivo.sample_rate, dispositivo.indice
+        )
         ok = self.grabador.iniciar(
-            lambda n: self.after(0, self.nivel.set, n),
-            self.config_obj.obtener_ruta_temp(),
+            lambda n: self._enviar_ui(self.nivel.set, n),
+            str(carpeta / "audio.wav"),
+            str(carpeta / "fragmentos_audio"),
+            lambda fragmento: self._transcripcion_incremental.encolar(fragmento),
+            duracion_fragmento=10.0,
         )
         if not ok:
+            self.repositorio.marcar_estado_grabacion(
+                carpeta,
+                "error",
+                self.grabador.ultimo_error or "No se pudo abrir el micrófono.",
+            )
             messagebox.showerror("Audio", self.grabador.ultimo_error or "No se pudo iniciar la grabación.")
             return
+        self._carpeta_grabacion = carpeta
+        self._transcripcion_incremental = TranscripcionIncremental(
+            self.transcriptor,
+            self.repositorio,
+            carpeta,
+            callback_segmentos=lambda segmentos: self._enviar_ui(
+                self._mostrar_transcripcion_incremental, segmentos
+            ),
+            callback_estado=lambda mensaje: self._enviar_ui(
+                self.estado.configure, {"text": mensaje}
+            ),
+        )
+        self.config_obj.dispositivo_audio = str(dispositivo.indice)
+        self.config_obj.sample_rate = dispositivo.sample_rate
+        self.config_obj.ultima_materia = materia
+        self.config_obj.guardar()
         self._grabando_desde = time.time()
+        self._deteniendo_grabacion = False
+        self.texto_grabar.delete("1.0", "end")
+        self.texto_grabar.insert(
+            "end",
+            "Escuchando… El primer texto aparecerá automáticamente en unos segundos."
+        )
         self.btn_grabar.configure(state="disabled")
         self.btn_detener.configure(state="normal")
-        self.estado.configure(text="Grabando...")
+        self.estado.configure(
+            text=f"Grabando con {dispositivo.nombre}; audio protegido en {carpeta.name}."
+        )
         self._actualizar_reloj()
 
     def _actualizar_reloj(self):
@@ -373,16 +462,123 @@ class AsistenteClasesApp(ctk.CTk):
         h, resto = divmod(segundos, 3600)
         m, s = divmod(resto, 60)
         self.reloj.configure(text=f"{h:02d}:{m:02d}:{s:02d}")
+        if segundos >= 5 and self.grabador.nivel_maximo < 0.002:
+            self.estado.configure(
+                text=(
+                    "ARGOS está grabando, pero no recibe señal del micrófono. "
+                    "Comprueba los permisos o el dispositivo predeterminado de Windows."
+                )
+            )
         self.after(1000, self._actualizar_reloj)
 
+    def _enviar_ui(self, callback, *args) -> None:
+        if self._cerrando:
+            return
+        try:
+            self.after(0, callback, *args)
+        except Exception:
+            # La ventana puede desaparecer entre la comprobación y ``after``.
+            pass
+
     def _detener_grabacion(self):
-        datos = self._datos_clase(self.materia_grabar, self.titulo_grabar)
-        ruta = self.grabador.detener() if self.grabador else None
-        self.btn_grabar.configure(state="normal")
+        if self._deteniendo_grabacion:
+            return
+        self._deteniendo_grabacion = True
+        carpeta = self._carpeta_grabacion
+        grabador = self.grabador
+        incremental = self._transcripcion_incremental
+        if carpeta:
+            self.repositorio.marcar_estado_grabacion(carpeta, "deteniendo")
         self.btn_detener.configure(state="disabled")
+        self.btn_detener.configure(text="Guardando texto pendiente…")
+        self.estado.configure(
+            text="Deteniendo el micrófono; terminando únicamente los fragmentos pendientes…"
+        )
+
+        def worker():
+            try:
+                ruta = grabador.detener() if grabador else None
+                if not ruta or not incremental:
+                    raise RuntimeError("No se pudo conservar el audio de la grabación.")
+                resultado = incremental.finalizar()
+                self._enviar_ui(
+                    self._grabacion_incremental_finalizada,
+                    resultado,
+                    grabador.nivel_maximo,
+                )
+            except Exception as exc:
+                if carpeta:
+                    self.repositorio.marcar_estado_grabacion(
+                        carpeta, "transcripcion_incompleta", str(exc)
+                    )
+                self._enviar_ui(self._error_final_grabacion, str(exc))
+
+        threading.Thread(
+            target=worker, daemon=True, name="argos-cierre-grabacion"
+        ).start()
+
+    def _mostrar_transcripcion_incremental(self, segmentos):
+        if self._cerrando:
+            return
+        self.texto_grabar.delete("1.0", "end")
+        self.texto_grabar.insert(
+            "end", "\n".join(segmento.a_linea_txt() for segmento in segmentos)
+        )
+        self.texto_grabar.see("end")
+
+    def _grabacion_incremental_finalizada(
+        self, resultado: ResultadoGrabacion, nivel_maximo: float
+    ):
+        self._restablecer_controles_grabacion()
+        if resultado.errores:
+            self.estado.configure(
+                text="Audio guardado; quedan fragmentos pendientes de recuperar."
+            )
+            messagebox.showwarning(
+                "Grabación protegida",
+                "El audio está guardado, pero una parte no pudo transcribirse ahora. "
+                "ARGOS la recuperará automáticamente al volver a abrir.\n\n"
+                + "\n".join(resultado.errores),
+            )
+            return
+        if not resultado.segmentos:
+            self.texto_grabar.delete("1.0", "end")
+            self.texto_grabar.insert(
+                "end",
+                "No se detectó voz. El audio sí se ha guardado para poder revisarlo.",
+            )
+            self.estado.configure(text="Grabación guardada sin voz reconocible.")
+            diagnostico = (
+                "ARGOS apenas recibió señal del micrófono. Revisa el permiso de "
+                "Windows y habla comprobando que la barra azul se mueve."
+                if nivel_maximo < 0.002
+                else "Llegó señal, pero Whisper no reconoció habla inteligible."
+            )
+            messagebox.showwarning(
+                "No se detectó voz",
+                f"{diagnostico}\n\nEl audio está conservado en:\n{resultado.carpeta}",
+            )
+            self._refrescar_clases()
+            return
+        self._mostrar_resultados(
+            self.texto_grabar, resultado.segmentos, resultado.carpeta
+        )
+
+    def _error_final_grabacion(self, error: str):
+        self._restablecer_controles_grabacion()
+        self.estado.configure(text=f"Audio protegido; cierre incompleto: {error}")
+        messagebox.showerror(
+            "Grabación",
+            f"El audio ya grabado se conserva, pero no pudo cerrarse la clase:\n{error}",
+        )
+
+    def _restablecer_controles_grabacion(self):
+        self.btn_grabar.configure(state="normal")
+        self.btn_detener.configure(state="disabled", text="Detener y guardar")
         self.nivel.set(0)
-        if ruta and datos:
-            self._procesar(ruta, "grabar", *datos)
+        self._deteniendo_grabacion = False
+        self._carpeta_grabacion = None
+        self._transcripcion_incremental = None
 
     def _seleccionar_archivo(self):
         ruta = filedialog.askopenfilename(
@@ -486,12 +682,96 @@ class AsistenteClasesApp(ctk.CTk):
                 )
                 self.after(0, self.estado_modelos.configure, {"text": texto, "text_color": "#4caf50"})
                 self.after(0, self.estado.configure, {"text": "Listo para grabar o transcribir."})
+                self.after(0, self._recuperar_grabaciones_interrumpidas)
                 self._registrar_resultado_modelos(True, texto)
             except Exception as exc:
                 self.after(0, self.estado_modelos.configure, {"text": "Error", "text_color": "#ef5350"})
                 self.after(0, self.estado.configure, {"text": str(exc)})
                 self._registrar_resultado_modelos(False, str(exc))
         threading.Thread(target=worker, daemon=True).start()
+
+    def _recuperar_grabaciones_interrumpidas(self):
+        if self._recuperacion_grabaciones_activa or not self.transcriptor:
+            return
+        pendientes = self.repositorio.grabaciones_interrumpidas()
+        if not pendientes:
+            return
+        self._recuperacion_grabaciones_activa = True
+        self.estado.configure(
+            text=(
+                f"Recuperando automáticamente {len(pendientes)} grabación(es) "
+                "interrumpida(s)…"
+            )
+        )
+
+        def worker():
+            recuperadas = 0
+            errores = []
+            for carpeta in pendientes:
+                try:
+                    ficha = json.loads(
+                        (carpeta / "ficha.json").read_text(encoding="utf-8")
+                    )
+                    sample_rate = int(
+                        ficha.get("sample_rate", self.config_obj.sample_rate)
+                    )
+                    recuperar_audio_interrumpido(
+                        carpeta / "audio.wav",
+                        carpeta / "fragmentos_audio",
+                        sample_rate,
+                        10.0,
+                    )
+                    incremental = TranscripcionIncremental(
+                        self.transcriptor,
+                        self.repositorio,
+                        carpeta,
+                        callback_estado=lambda mensaje: self._enviar_ui(
+                            self.estado.configure, {"text": mensaje}
+                        ),
+                    )
+                    incremental.encolar_varios(
+                        self.repositorio.fragmentos_pendientes(carpeta)
+                    )
+                    resultado = incremental.finalizar()
+                    if resultado.completa:
+                        recuperadas += 1
+                        self._enviar_ui(self._grabacion_recuperada, resultado)
+                    else:
+                        errores.extend(resultado.errores)
+                except Exception as exc:
+                    errores.append(f"{carpeta.name}: {exc}")
+                    self.repositorio.marcar_estado_grabacion(
+                        carpeta, "transcripcion_incompleta", str(exc)
+                    )
+            self._enviar_ui(
+                self._fin_recuperacion_grabaciones,
+                recuperadas,
+                errores,
+            )
+
+        threading.Thread(
+            target=worker, daemon=True, name="argos-recuperacion-grabaciones"
+        ).start()
+
+    def _grabacion_recuperada(self, resultado: ResultadoGrabacion):
+        self._refrescar_clases()
+        if resultado.segmentos and hasattr(self, "_encolar_pipeline"):
+            self._actualizar_selector_pipeline()
+            self._encolar_pipeline(resultado.carpeta, automatico=True)
+
+    def _fin_recuperacion_grabaciones(self, recuperadas: int, errores: list[str]):
+        self._recuperacion_grabaciones_activa = False
+        if errores:
+            self.estado.configure(
+                text=(
+                    f"Se recuperaron {recuperadas} grabaciones; "
+                    f"{len(errores)} siguen pendientes."
+                )
+            )
+            return
+        self.estado.configure(
+            text=f"Grabaciones recuperadas automáticamente: {recuperadas}."
+        )
 
     @staticmethod
     def _registrar_resultado_modelos(exito: bool, detalle: str) -> None:
@@ -515,6 +795,15 @@ class AsistenteClasesApp(ctk.CTk):
             pass
 
     def _cerrar(self):
+        self._cerrando = True
         if self.grabador and self.grabador.esta_grabando():
+            if self._carpeta_grabacion:
+                self.repositorio.marcar_estado_grabacion(
+                    self._carpeta_grabacion,
+                    "interrumpida",
+                    "ARGOS se cerró durante la grabación; recuperación pendiente.",
+                )
             self.grabador.detener()
+        if self._transcripcion_incremental:
+            self._transcripcion_incremental.cerrar_sin_esperar()
         self.destroy()

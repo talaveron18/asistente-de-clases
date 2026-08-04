@@ -64,9 +64,22 @@ class ArgosApp(AsistenteClasesApp):
         )
         self.progreso_grabar.set(0)
         self.progreso_archivo.set(0)
-        self.estado.configure(text="Transcripción guardada. Clase en cola de análisis...")
         self._refrescar_clases()
         self._actualizar_selector_pipeline()
+        if not segmentos:
+            self.estado.configure(
+                text=(
+                    "Audio guardado, pero no se detectó voz; no se inicia "
+                    "el análisis de una transcripción vacía."
+                )
+            )
+            messagebox.showwarning(
+                "No se detectó voz",
+                "El audio se ha conservado, pero no contiene voz reconocible. "
+                "ARGOS no ejecutará el análisis hasta que exista una transcripción.",
+            )
+            return
+        self.estado.configure(text="Transcripción guardada. Clase en cola de análisis...")
         self._encolar_pipeline(carpeta, automatico=True)
 
     def _encolar_pipeline(self, carpeta: str | Path, automatico: bool) -> bool:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
@@ -68,6 +69,7 @@ class TranscriptorClases:
         self.modelos_cargados = False
         self.diarizacion_disponible = False
         self.dispositivo_real = "cpu"
+        self._transcripcion_lock = threading.Lock()
 
     def cargar_modelos(self, callback_status: Optional[Callable] = None):
         def status(msg, p=0.0):
@@ -143,15 +145,16 @@ class TranscriptorClases:
 
         prog("Transcribiendo con Whisper...", 0.05)
         language = None if self.idioma == "auto" else self.idioma
-        segmentos_iter, _info = self.whisper_model.transcribe(
-            archivo_audio,
-            language=language,
-            beam_size=3,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
-            condition_on_previous_text=True,
-        )
-        segmentos_whisper = list(segmentos_iter)
+        with self._transcripcion_lock:
+            segmentos_iter, _info = self.whisper_model.transcribe(
+                archivo_audio,
+                language=language,
+                beam_size=3,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 500},
+                condition_on_previous_text=True,
+            )
+            segmentos_whisper = list(segmentos_iter)
         if not segmentos_whisper:
             return []
         prog(f"Texto detectado: {len(segmentos_whisper)} segmentos.", 0.55)
@@ -162,7 +165,8 @@ class TranscriptorClases:
 
         prog("Separando voces...", 0.6)
         kwargs = {"num_speakers": min_hablantes} if min_hablantes == max_hablantes else {"min_speakers": min_hablantes, "max_speakers": max_hablantes}
-        salida = self.diarization_pipeline(archivo_audio, **kwargs)
+        with self._transcripcion_lock:
+            salida = self.diarization_pipeline(archivo_audio, **kwargs)
         anotacion = getattr(salida, "exclusive_speaker_diarization", None) or getattr(salida, "speaker_diarization", None) or salida
         turnos = []
         if hasattr(anotacion, "itertracks"):
@@ -174,6 +178,38 @@ class TranscriptorClases:
 
         prog("Transcripción completada.", 1.0)
         return self._asignar_roles(self._fusionar(segmentos_whisper, turnos))
+
+    def transcribir_fragmento(self, archivo_audio: str):
+        """Transcribe un fragmento corto sin bloquear la captura de audio.
+
+        La diarización se reserva al procesamiento posterior. Ejecutarla cada
+        diez segundos sería lenta e introduciría roles incoherentes entre
+        fragmentos.
+        """
+        if not self.modelos_cargados or self.whisper_model is None:
+            raise RuntimeError("Los modelos no están cargados.")
+        if not os.path.isfile(archivo_audio):
+            raise FileNotFoundError(archivo_audio)
+        language = None if self.idioma == "auto" else self.idioma
+        with self._transcripcion_lock:
+            segmentos_iter, _info = self.whisper_model.transcribe(
+                archivo_audio,
+                language=language,
+                beam_size=3,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 350},
+                condition_on_previous_text=False,
+            )
+            return [
+                SegmentoTranscrito(
+                    segmento.start,
+                    segmento.end,
+                    segmento.text,
+                    "SPEAKER_00",
+                    "Docente",
+                )
+                for segmento in segmentos_iter
+            ]
 
     @staticmethod
     def _fusionar(segmentos_whisper, turnos):

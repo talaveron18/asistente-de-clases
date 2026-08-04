@@ -13,6 +13,8 @@ La prioridad es estabilizar el flujo completo de clases antes de ampliar funcion
 
 - `main.py`: interfaz base, grabación, importación multimedia, biblioteca y configuración.
 - `grabador.py`: grabación directa a WAV.
+- `transcripcion_incremental.py`: cola durable de fragmentos y autoguardado de
+  la transcripción mientras continúa la captura.
 - `transcriptor.py`: Faster-Whisper y diarización opcional.
 - `media_utils.py`: preparación de audio y vídeo.
 - `repositorio.py`: archivo de clases.
@@ -67,6 +69,10 @@ enriquecedor_argos.py
 - Cada etapa actualiza `estado_argos.json` mediante escritura atómica.
 - Los estados `procesando` huérfanos se convierten en errores reprocesables al reiniciar.
 - No existe sondeo de `pipeline_clase.json` ni espera silenciosa por aparición de archivos.
+- La captura nunca espera a Whisper: el grabador cierra fragmentos WAV en un
+  hilo y la transcripción los consume secuencialmente en otro.
+- Cada fragmento confirmado tiene un JSON propio. Tras un cierre, ARGOS repara
+  el WAV continuo y procesa únicamente los fragmentos sin confirmación.
 
 ## Trazabilidad
 
