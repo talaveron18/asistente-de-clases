@@ -22,11 +22,7 @@ class CoincidenciaFTS:
 
 
 class IndiceConocimientoSQLite:
-    """Índice local FTS5 para clases y biblioteca médica.
-
-    La base de datos se puede reconstruir siempre a partir de los archivos
-    originales. No contiene credenciales ni modifica las fuentes.
-    """
+    """Índice local FTS5 para clases y biblioteca médica."""
 
     def __init__(self, raiz_general: str | None = None):
         documentos = Path.home() / "Documents"
@@ -70,12 +66,10 @@ class IndiceConocimientoSQLite:
         terminos = [t for t in terminos if len(t) > 1]
         if not terminos:
             return '"' + consulta.replace('"', '""') + '"'
-        return " OR ".join(f'"{t.replace(chr(34), chr(34)*2)}"' for t in terminos)
+        return " OR ".join(f'"{t.replace(chr(34), chr(34) * 2)}"' for t in terminos)
 
     def reconstruir(self, callback=None) -> dict:
-        registros = []
-        registros.extend(self._leer_clases())
-        registros.extend(self._leer_documentos())
+        registros = [*self._leer_clases(), *self._leer_documentos()]
         total = max(1, len(registros))
         with self._conectar() as con:
             con.execute("DELETE FROM conocimiento")
@@ -83,9 +77,16 @@ class IndiceConocimientoSQLite:
                 con.execute(
                     "INSERT INTO conocimiento VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        r["id"], r["tipo_fuente"], r["categoria"], r["titulo"],
-                        r["materia"], r["ubicacion"], r["contenido"], r["ruta"],
-                        r.get("pagina"), r.get("minuto"),
+                        r["id"],
+                        r["tipo_fuente"],
+                        r["categoria"],
+                        r["titulo"],
+                        r["materia"],
+                        r["ubicacion"],
+                        r["contenido"],
+                        r["ruta"],
+                        r.get("pagina"),
+                        r.get("minuto"),
                     ),
                 )
                 if callback and (i == total or i % 25 == 0):
@@ -94,7 +95,11 @@ class IndiceConocimientoSQLite:
                 "INSERT OR REPLACE INTO metadatos(clave, valor) VALUES ('total_bloques', ?)",
                 (str(len(registros)),),
             )
-        return {"bloques": len(registros), "clases": sum(r["tipo_fuente"] == "Clase" for r in registros), "documentos": sum(r["tipo_fuente"] != "Clase" for r in registros)}
+        return {
+            "bloques": len(registros),
+            "clases": sum(r["tipo_fuente"] == "Clase" for r in registros),
+            "documentos": sum(r["tipo_fuente"] != "Clase" for r in registros),
+        }
 
     def _leer_clases(self):
         registros = []
@@ -102,7 +107,8 @@ class IndiceConocimientoSQLite:
             if "Biblioteca médica" in ficha_path.parts:
                 continue
             carpeta = ficha_path.parent
-            transcripcion = carpeta / "transcripcion.txt"
+            revisada = carpeta / "transcripcion_medica_revisada.txt"
+            transcripcion = revisada if revisada.exists() else carpeta / "transcripcion.txt"
             if not transcripcion.exists():
                 continue
             try:
@@ -118,10 +124,15 @@ class IndiceConocimientoSQLite:
                 marca = re.match(r"^\[([^\]]+)\]", linea)
                 minuto = marca.group(1) if marca else None
                 registros.append({
-                    "id": f"clase:{ficha_path}:{n}", "tipo_fuente": "Clase",
-                    "categoria": "Clases", "titulo": titulo, "materia": materia,
+                    "id": f"clase:{ficha_path}:{n}",
+                    "tipo_fuente": "Clase",
+                    "categoria": "Clases",
+                    "titulo": titulo,
+                    "materia": materia,
                     "ubicacion": f"{materia} · {minuto or 'sin minuto'}",
-                    "contenido": linea, "ruta": str(carpeta), "minuto": minuto,
+                    "contenido": linea,
+                    "ruta": str(carpeta),
+                    "minuto": minuto,
                 })
         return registros
 
@@ -133,11 +144,16 @@ class IndiceConocimientoSQLite:
             indice = json.loads(indice_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
+
         registros = []
         for item in indice:
             if item.get("estado_indice_ia") != "texto_extraido":
                 continue
-            ruta_indice = item.get("ruta_indice_texto") or item.get("indice_texto")
+            ruta_indice = (
+                item.get("ruta_extraccion")
+                or item.get("ruta_indice_texto")
+                or item.get("indice_texto")
+            )
             if not ruta_indice or not Path(ruta_indice).exists():
                 continue
             try:
@@ -151,10 +167,14 @@ class IndiceConocimientoSQLite:
                 numero = int(pagina.get("pagina", 1))
                 registros.append({
                     "id": f"doc:{item.get('id')}:{numero}",
-                    "tipo_fuente": "Documento", "categoria": item.get("categoria", "Documento"),
-                    "titulo": item.get("nombre", "Documento"), "materia": "",
-                    "ubicacion": f"Página {numero}", "contenido": texto,
-                    "ruta": item.get("ruta", ""), "pagina": numero,
+                    "tipo_fuente": "Documento",
+                    "categoria": item.get("categoria", "Documento"),
+                    "titulo": item.get("nombre", "Documento"),
+                    "materia": "",
+                    "ubicacion": f"Página {numero}",
+                    "contenido": texto,
+                    "ruta": item.get("ruta", ""),
+                    "pagina": numero,
                 })
         return registros
 
@@ -187,14 +207,26 @@ class IndiceConocimientoSQLite:
                 filas = con.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
             return []
-        return [CoincidenciaFTS(
-            tipo_fuente=f["tipo_fuente"], categoria=f["categoria"], titulo=f["titulo"],
-            materia=f["materia"], ubicacion=f["ubicacion"], contenido=f["fragmento"],
-            ruta=f["ruta"], pagina=f["pagina"], minuto=f["minuto"], relevancia=float(f["rango"] or 0),
-        ) for f in filas]
+        return [
+            CoincidenciaFTS(
+                tipo_fuente=f["tipo_fuente"],
+                categoria=f["categoria"],
+                titulo=f["titulo"],
+                materia=f["materia"],
+                ubicacion=f["ubicacion"],
+                contenido=f["fragmento"],
+                ruta=f["ruta"],
+                pagina=f["pagina"],
+                minuto=f["minuto"],
+                relevancia=float(f["rango"] or 0),
+            )
+            for f in filas
+        ]
 
     def estadisticas(self) -> dict:
         with self._conectar() as con:
             total = con.execute("SELECT count(*) FROM conocimiento").fetchone()[0]
-            clases = con.execute("SELECT count(*) FROM conocimiento WHERE tipo_fuente='Clase'").fetchone()[0]
+            clases = con.execute(
+                "SELECT count(*) FROM conocimiento WHERE tipo_fuente='Clase'"
+            ).fetchone()[0]
         return {"bloques": total, "clases": clases, "documentos": total - clases}
