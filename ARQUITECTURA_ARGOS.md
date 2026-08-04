@@ -1,87 +1,88 @@
-# Arquitectura de Asistente de Clases / ARGOS
+# Arquitectura de ARGOS
 
-## 1. Transcripción profesional
+## Alcance actual
 
-Pensada para reuniones, entrevistas, clases impartidas y cualquier grabación no académica.
+1. Clases de Medicina.
+2. Reuniones en una fase posterior.
 
-Funciones:
-- Grabar audio en directo.
-- Importar audio o vídeo largo.
-- Transcribir con marcas de tiempo.
-- Diarización opcional.
-- Exportar TXT, Markdown y SRT.
-- Guardar por proyecto, cliente o evento.
+La prioridad es estabilizar el flujo completo de clases antes de ampliar funciones.
 
-Este espacio no debe mezclar automáticamente el contenido con la base médica.
+## Componentes
 
-## 2. Estudio médico
+### Núcleo de captura
 
-Pensado para construir una base de conocimiento personal por asignaturas.
+- `main.py`: interfaz base, grabación, importación multimedia, biblioteca y configuración.
+- `grabador.py`: grabación directa a WAV.
+- `transcriptor.py`: Faster-Whisper y diarización opcional.
+- `media_utils.py`: preparación de audio y vídeo.
+- `repositorio.py`: archivo de clases.
 
-Fuentes:
-- Clases grabadas.
-- Vídeos históricos.
-- Apuntes propios.
-- Exámenes y preguntas del profesor.
-- Tratados y libros en PDF.
-- Artículos y guías.
+### Pipeline de clase
 
-Estructura local:
+- `argos_app.py`: punto de entrada y cola única.
+- `orquestador.py`: única cadena autorizada de postprocesamiento.
+- `transcripciones.py`: selección de original o revisión vigente.
+- `correccion_medica.py`: revisión conservadora desde el original.
+- `pipeline_clase.py`: limpieza, segmentación, hallazgos e índice temporal.
+- `material_estudio.py`: Word, flashcards y preguntas.
+- `enriquecedor_argos.py`: referencias documentales sin índice propio.
+
+### Conocimiento local
+
+- `biblioteca_medica.py`: importación y catálogo.
+- `extractor_documentos.py`: extracción por página.
+- `indice_sqlite.py`: único motor de recuperación FTS5.
+- `chat_argos.py`: presentación extractiva de resultados del FTS5.
+
+## Flujo secuencial
 
 ```text
-Documentos/Asistente de Clases/
-├── Clases/
-└── Biblioteca médica/
-    ├── Tratados/
-    ├── Apuntes/
-    ├── Exámenes/
-    ├── Artículos/
-    └── Otros/
+transcripcion.txt
+      ↓
+correccion_medica.py
+      ↓
+transcripcion_medica_revisada.txt
+      ↓
+transcripciones.fuente_vigente()
+      ↓
+pipeline_clase.py
+      ↓
+material_estudio.py
+      ↓
+indice_sqlite.py
+      ↓
+enriquecedor_argos.py
 ```
 
-## Principio de trazabilidad
+`transcripcion_limpia.txt` es siempre una salida. No puede alimentar correcciones ni futuros reprocesamientos.
 
-Toda respuesta futura del motor IA deberá distinguir claramente:
-- contenido procedente de una clase;
-- contenido procedente de apuntes;
-- contenido procedente de un tratado o artículo;
-- inferencias o explicaciones generadas por la IA.
+## Concurrencia
 
-Nunca se debe presentar una afirmación como procedente de un libro cuando no esté sustentada por ese documento.
+- La aplicación mantiene una cola única de clases.
+- `orquestador.py` crea `.argos_procesando.lock` dentro de cada clase.
+- Dos ventanas no pueden procesar simultáneamente la misma carpeta.
+- Cada etapa actualiza `estado_argos.json` mediante escritura atómica.
+- No existe sondeo de `pipeline_clase.json` ni espera silenciosa por aparición de archivos.
 
-## Fases
+## Trazabilidad
 
-### Fase 1 — Repositorios locales
-- Biblioteca de clases.
-- Biblioteca médica.
-- Importación de PDF, DOCX, TXT y Markdown.
-- Índice de archivos y detección de duplicados.
+Toda respuesta futura deberá distinguir:
 
-### Fase 2 — Extracción documental
-- Lectura de PDFs con texto.
-- OCR opcional para PDFs escaneados.
-- División por capítulos, páginas y bloques.
-- Conservación de página y fuente.
+- contenido de clase original o revisado;
+- contenido de apuntes;
+- contenido de tratados o artículos;
+- inferencias generadas por IA.
 
-### Fase 3 — Buscador inteligente
-- Búsqueda literal.
-- Búsqueda semántica.
-- Resultados con fuente, página y minuto.
+Las clases conservan minuto. Los documentos conservan archivo y página.
 
-### Fase 4 — ARGOS IA
-- Apuntes estructurados.
-- Resúmenes por bloques.
-- Preguntas del profesor.
-- Conceptos señalados como importantes.
-- Flashcards y exámenes.
-- Comparación entre clase, apuntes y tratados.
+## Búsqueda
 
-### Fase 5 — Chat con conocimiento
-- Respuestas fundamentadas en las fuentes seleccionadas.
-- Citas a página, archivo y minuto.
-- Elección de alcance: una clase, una materia o toda la biblioteca.
+SQLite FTS5 es el único motor. El chat y el enriquecedor son consumidores del mismo índice y del mismo contrato de resultados.
 
 ## Instalador
 
-El usuario debe recibir un único `Asistente-de-Clases-Setup.exe`.
-La instalación crea accesos directos y las carpetas de datos en Documentos. Los modelos se descargan en el primer uso para evitar un instalador de varios gigabytes.
+```text
+argos_app.py → ARGOS.spec → installer.iss → ARGOS-Setup.exe
+```
+
+Los modelos se descargan en el primer uso para evitar un instalador de varios gigabytes.
