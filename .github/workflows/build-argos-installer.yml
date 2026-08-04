@@ -47,7 +47,7 @@ jobs:
             --hidden-import pypdf `
             --hidden-import docx `
             --hidden-import sounddevice `
-            main_v5.py
+            main_v6.py
 
       - name: Instalar Inno Setup
         shell: pwsh
