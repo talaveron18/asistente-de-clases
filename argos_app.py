@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import threading
 from pathlib import Path
 from tkinter import messagebox
@@ -8,28 +9,25 @@ from tkinter import messagebox
 import customtkinter as ctk
 
 from chat_argos import ChatArgos
-from correccion_medica import corregir_archivo_transcripcion
-from enriquecedor_argos import enriquecer_clase_con_fuentes
 from indice_sqlite import IndiceConocimientoSQLite
 from main import AsistenteClasesApp
-from material_estudio import generar_material_estudio
-from pipeline_clase import analizar_clase_completa
+from orquestador import ClaseEnProcesoError, OrquestadorArgos
 
 
 class ArgosApp(AsistenteClasesApp):
-    """Único punto de entrada de ARGOS.
-
-    Reutiliza el núcleo estable de grabación/biblioteca de ``main.py`` y añade
-    el procesamiento de estudio y el chat sin la cadena main_v2...main_v7.
-    """
+    """Único punto de entrada y única cola de procesamiento de ARGOS."""
 
     def __init__(self):
         super().__init__()
         self.title("ARGOS · Clases de Medicina")
         self.indice_fts = IndiceConocimientoSQLite(str(self.repositorio.raiz))
         self.chat_argos = ChatArgos(self.indice_fts)
-        self._pipeline_activo = False
+        self.orquestador = OrquestadorArgos(self.indice_fts)
+
         self._clases_pipeline: list[dict] = []
+        self._cola_pipeline: queue.Queue[dict] = queue.Queue()
+        self._rutas_pendientes: set[str] = set()
+        self._pipeline_activo = False
 
         self.tab_pipeline = self.tabs.add("Procesar clase")
         self.tab_chat = self.tabs.add("Chat ARGOS")
@@ -37,6 +35,12 @@ class ArgosApp(AsistenteClasesApp):
         self._crear_tab_chat()
         self._actualizar_selector_pipeline()
         self._actualizar_estado_indice()
+
+        threading.Thread(
+            target=self._consumir_cola_pipeline,
+            daemon=True,
+            name="argos-pipeline",
+        ).start()
 
     def _mostrar_resultados(self, caja, segmentos, carpeta):
         caja.delete("1.0", "end")
@@ -48,63 +52,114 @@ class ArgosApp(AsistenteClasesApp):
         )
         self.progreso_grabar.set(0)
         self.progreso_archivo.set(0)
-        self.estado.configure(text="Transcripción guardada. Procesando la clase...")
+        self.estado.configure(text="Transcripción guardada. Clase en cola de análisis...")
         self._refrescar_clases()
-        self._pipeline_activo = True
+        self._actualizar_selector_pipeline()
+        self._encolar_pipeline(carpeta, automatico=True)
 
-        def worker():
+    def _encolar_pipeline(self, carpeta: str | Path, automatico: bool) -> bool:
+        ruta = str(Path(carpeta).resolve())
+        if ruta in self._rutas_pendientes:
+            if not automatico:
+                messagebox.showwarning(
+                    "ARGOS", "Esta clase ya está en la cola de procesamiento."
+                )
+            return False
+        self._rutas_pendientes.add(ruta)
+        self._cola_pipeline.put({"ruta": ruta, "automatico": automatico})
+        posicion = self._cola_pipeline.qsize()
+        self.estado_pipeline.configure(
+            text=f"Clase añadida a la cola. Posición aproximada: {posicion}."
+        )
+        return True
+
+    def _consumir_cola_pipeline(self):
+        while True:
+            trabajo = self._cola_pipeline.get()
+            ruta = trabajo["ruta"]
+            automatico = bool(trabajo["automatico"])
+            self._pipeline_activo = True
+            self.after(0, self._inicio_pipeline_ui, ruta)
             try:
-                resultado = self._procesar_clase_completa(carpeta)
-                self.after(0, self._finalizar_clase, carpeta, resultado)
-            except Exception as exc:
-                self.after(0, messagebox.showwarning, "Clase guardada con aviso", str(exc))
+                resultado = self.orquestador.procesar_clase(
+                    ruta,
+                    callback=lambda mensaje, progreso: self.after(
+                        0,
+                        self._actualizar_progreso_pipeline,
+                        mensaje,
+                        progreso,
+                    ),
+                )
                 self.after(
                     0,
-                    self.estado.configure,
-                    {"text": f"Clase guardada; procesamiento pendiente: {exc}"},
+                    self._pipeline_completado,
+                    ruta,
+                    resultado,
+                    automatico,
                 )
+            except ClaseEnProcesoError as exc:
+                self.after(0, self._pipeline_error, ruta, str(exc), automatico)
+            except Exception as exc:
+                self.after(0, self._pipeline_error, ruta, str(exc), automatico)
             finally:
+                self._rutas_pendientes.discard(ruta)
                 self._pipeline_activo = False
+                self._cola_pipeline.task_done()
+                self.after(0, self._fin_pipeline_ui)
 
-        threading.Thread(target=worker, daemon=True).start()
+    def _inicio_pipeline_ui(self, ruta: str):
+        self.btn_reprocesar.configure(state="disabled")
+        self.progreso_pipeline.set(0)
+        self.estado_pipeline.configure(text=f"Procesando: {Path(ruta).name}")
+        self.estado.configure(text="ARGOS está procesando una clase...")
 
-    def _procesar_clase_completa(self, carpeta: str | Path) -> dict:
-        """Una sola cadena: análisis, revisión, materiales, fuentes e índice."""
-        carpeta = Path(carpeta)
-        analizar_clase_completa(carpeta)
-        correcciones = corregir_archivo_transcripcion(carpeta)
-        datos = analizar_clase_completa(carpeta)
-        material = generar_material_estudio(carpeta)
-        enriquecido = enriquecer_clase_con_fuentes(carpeta)
-        indice = self.indice_fts.reconstruir()
+    def _actualizar_progreso_pipeline(self, mensaje: str, progreso: float):
+        self.estado_pipeline.configure(text=mensaje)
+        self.estado.configure(text=mensaje)
+        self.progreso_pipeline.set(max(0.0, min(1.0, progreso)))
 
-        return {
-            "bloques": len(datos.get("bloques", [])),
-            "avisos": len(datos.get("avisos_examen", [])),
-            "preguntas": len(datos.get("preguntas_profesor", [])),
-            "correcciones": correcciones.get("total_cambios", 0),
-            "flashcards": material.get("flashcards", 0),
-            "referencias": sum(
-                len(b.get("referencias_locales", []))
-                for b in enriquecido.get("bloques", [])
-            ),
-            "indice": indice,
-        }
+    def _fin_pipeline_ui(self):
+        self.btn_reprocesar.configure(state="normal")
+        if self._cola_pipeline.empty():
+            self.progreso_pipeline.set(0)
 
-    def _finalizar_clase(self, carpeta, resultado):
-        self.estado.configure(text=f"Clase completa: {carpeta}")
-        self._actualizar_selector_pipeline()
+    def _pipeline_completado(
+        self,
+        ruta: str,
+        resultado: dict,
+        automatico: bool,
+    ):
+        self.progreso_pipeline.set(1)
+        self.estado_pipeline.configure(text="Procesamiento completado.")
+        self.estado.configure(text=f"Clase completa: {ruta}")
         self._actualizar_estado_indice()
+        self._actualizar_selector_pipeline()
+        self._mostrar_resumen_pipeline(ruta, resultado)
+        titulo = "Clase procesada" if automatico else "Reprocesamiento completado"
         messagebox.showinfo(
             "ARGOS",
-            "Clase transcrita y procesada.\n\n"
-            f"Bloques: {resultado['bloques']}\n"
-            f"Avisos de examen: {resultado['avisos']}\n"
-            f"Preguntas: {resultado['preguntas']}\n"
-            f"Correcciones médicas: {resultado['correcciones']}\n"
-            f"Flashcards: {resultado['flashcards']}\n"
-            f"Referencias locales: {resultado['referencias']}\n\n"
-            f"Carpeta:\n{carpeta}",
+            f"{titulo}.\n\n"
+            f"Fuente: {resultado.get('archivo_fuente', '')}\n"
+            f"Bloques: {resultado.get('bloques', 0)}\n"
+            f"Avisos de examen: {resultado.get('avisos', 0)}\n"
+            f"Preguntas: {resultado.get('preguntas', 0)}\n"
+            f"Correcciones médicas: {resultado.get('correcciones', 0)}\n"
+            f"Flashcards: {resultado.get('flashcards', 0)}\n"
+            f"Referencias locales: {resultado.get('referencias', 0)}\n\n"
+            f"Carpeta:\n{ruta}",
+        )
+
+    def _pipeline_error(self, ruta: str, error: str, automatico: bool):
+        self.progreso_pipeline.set(0)
+        self.estado_pipeline.configure(text=f"Error: {error}")
+        self.estado.configure(
+            text=f"Clase guardada; procesamiento incompleto: {error}"
+        )
+        messagebox.showerror(
+            "ARGOS",
+            "La transcripción está guardada, pero el procesamiento falló.\n\n"
+            f"Clase: {ruta}\n\nError: {error}\n\n"
+            "Consulta estado_argos.json dentro de la carpeta.",
         )
 
     def _crear_tab_pipeline(self):
@@ -112,14 +167,14 @@ class ArgosApp(AsistenteClasesApp):
         panel.pack(fill="x", padx=14, pady=14)
         ctk.CTkLabel(
             panel,
-            text="Pipeline completo de clase",
+            text="Pipeline único de clase",
             font=ctk.CTkFont(size=19, weight="bold"),
         ).pack(anchor="w", padx=14, pady=(14, 4))
         ctk.CTkLabel(
             panel,
             text=(
-                "Reprocesa de forma secuencial: análisis, corrección médica, "
-                "apuntes, flashcards, referencias locales e índice."
+                "Corrección médica → análisis → material de estudio → índice FTS5 "
+                "→ referencias. Las clases se procesan en una sola cola."
             ),
             text_color="#aaaaaa",
             anchor="w",
@@ -150,7 +205,10 @@ class ArgosApp(AsistenteClasesApp):
         self.estado_pipeline = ctk.CTkLabel(
             self.tab_pipeline, text="Selecciona una clase.", anchor="w"
         )
-        self.estado_pipeline.pack(fill="x", padx=18, pady=(0, 8))
+        self.estado_pipeline.pack(fill="x", padx=18, pady=(0, 6))
+        self.progreso_pipeline = ctk.CTkProgressBar(self.tab_pipeline)
+        self.progreso_pipeline.pack(fill="x", padx=14, pady=(0, 10))
+        self.progreso_pipeline.set(0)
         self.salida_pipeline = ctk.CTkTextbox(
             self.tab_pipeline, font=ctk.CTkFont(size=13)
         )
@@ -159,7 +217,8 @@ class ArgosApp(AsistenteClasesApp):
     def _actualizar_selector_pipeline(self):
         self._clases_pipeline = self.repositorio.listar_clases("")
         valores = [
-            f"{c.get('materia', '')} · {c.get('numero', 0):03d} · {c.get('titulo', '')}"
+            f"{c.get('materia', '')} · {c.get('numero', 0):03d} · "
+            f"{c.get('titulo', '')}"
             for c in self._clases_pipeline
         ] or ["Sin clases guardadas"]
         self.selector_pipeline.configure(values=valores)
@@ -173,58 +232,43 @@ class ArgosApp(AsistenteClasesApp):
             indice = valores.index(self.selector_pipeline.get())
         except ValueError:
             return None
-        return self._clases_pipeline[indice] if indice < len(self._clases_pipeline) else None
+        if indice >= len(self._clases_pipeline):
+            return None
+        return self._clases_pipeline[indice]
 
     def _reprocesar_clase(self):
-        if self._pipeline_activo:
-            messagebox.showwarning("ARGOS", "Ya hay una clase procesándose.")
-            return
         clase = self._clase_pipeline_seleccionada()
         if not clase:
             messagebox.showwarning("ARGOS", "Selecciona una clase válida.")
             return
-
-        self._pipeline_activo = True
-        self.btn_reprocesar.configure(state="disabled")
-        self.estado_pipeline.configure(text="Procesando clase...")
         self.salida_pipeline.delete("1.0", "end")
+        self._encolar_pipeline(clase["ruta"], automatico=False)
 
-        def worker():
-            try:
-                resultado = self._procesar_clase_completa(clase["ruta"])
-                self.after(0, self._mostrar_reprocesado, clase, resultado)
-            except Exception as exc:
-                self.after(0, messagebox.showerror, "Procesamiento", str(exc))
-                self.after(
-                    0, self.estado_pipeline.configure, {"text": f"Error: {exc}"}
-                )
-            finally:
-                self._pipeline_activo = False
-                self.after(0, self.btn_reprocesar.configure, {"state": "normal"})
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _mostrar_reprocesado(self, clase, resultado):
+    def _mostrar_resumen_pipeline(self, ruta: str, resultado: dict):
+        indice = resultado.get("indice", {})
         lineas = [
-            f"Clase: {clase.get('materia')} · {clase.get('titulo')}",
+            f"Clase: {Path(ruta).name}",
+            f"Fuente utilizada: {resultado.get('archivo_fuente', '')}",
             "",
-            f"Bloques temáticos: {resultado['bloques']}",
-            f"Avisos de examen: {resultado['avisos']}",
-            f"Preguntas: {resultado['preguntas']}",
-            f"Correcciones médicas: {resultado['correcciones']}",
-            f"Flashcards: {resultado['flashcards']}",
-            f"Referencias locales: {resultado['referencias']}",
-            f"Bloques indexados: {resultado['indice']['bloques']}",
+            f"Bloques temáticos: {resultado.get('bloques', 0)}",
+            f"Avisos de examen: {resultado.get('avisos', 0)}",
+            f"Preguntas: {resultado.get('preguntas', 0)}",
+            f"Correcciones médicas: {resultado.get('correcciones', 0)}",
+            f"Flashcards: {resultado.get('flashcards', 0)}",
+            f"Referencias locales: {resultado.get('referencias', 0)}",
+            f"Bloques indexados: {indice.get('bloques', 0)}",
+            "",
+            "El detalle de cada etapa está en estado_argos.json.",
         ]
+        self.salida_pipeline.delete("1.0", "end")
         self.salida_pipeline.insert("end", "\n".join(lineas))
-        self.estado_pipeline.configure(text="Procesamiento completado.")
-        self._actualizar_estado_indice()
 
     def _crear_tab_chat(self):
         superior = ctk.CTkFrame(self.tab_chat)
         superior.pack(fill="x", padx=14, pady=14)
         self.pregunta_argos = ctk.CTkEntry(
-            superior, placeholder_text="Pregunta a tus clases, apuntes y tratados..."
+            superior,
+            placeholder_text="Pregunta a tus clases, apuntes y tratados...",
         )
         self.pregunta_argos.pack(
             side="left", fill="x", expand=True, padx=(12, 6), pady=12
@@ -247,7 +291,10 @@ class ArgosApp(AsistenteClasesApp):
         self.alcance_chat.set("Todo")
         self.alcance_chat.pack(side="left", padx=6)
         ctk.CTkButton(
-            superior, text="Preguntar", command=self._preguntar_argos, width=95
+            superior,
+            text="Preguntar",
+            command=self._preguntar_argos,
+            width=95,
         ).pack(side="left", padx=6)
         ctk.CTkButton(
             superior,
@@ -275,15 +322,22 @@ class ArgosApp(AsistenteClasesApp):
             stats = self.indice_fts.estadisticas()
             self.estado_chat.configure(
                 text=(
-                    f"Índice local: {stats['bloques']} bloques · "
-                    f"{stats['clases']} de clases · {stats['documentos']} documentales"
+                    f"Índice FTS5: {stats['bloques']} bloques · "
+                    f"{stats['clases']} de clases · "
+                    f"{stats['documentos']} documentales"
                 )
             )
         except Exception as exc:
             self.estado_chat.configure(text=f"Índice no disponible: {exc}")
 
     def _reconstruir_indice(self):
-        self.estado_chat.configure(text="Reconstruyendo índice...")
+        if self._pipeline_activo or not self._cola_pipeline.empty():
+            messagebox.showwarning(
+                "Índice ARGOS",
+                "Espera a que termine la cola de clases antes de reconstruir el índice.",
+            )
+            return
+        self.estado_chat.configure(text="Reconstruyendo índice FTS5...")
 
         def worker():
             try:
@@ -308,12 +362,14 @@ class ArgosApp(AsistenteClasesApp):
         self.respuesta_chat.delete("1.0", "end")
         for widget in self.fuentes_chat.winfo_children():
             widget.destroy()
-        self.estado_chat.configure(text="Consultando el índice local...")
+        self.estado_chat.configure(text="Consultando el único índice FTS5...")
 
         def worker():
             try:
                 respuesta = self.chat_argos.preguntar(
-                    pregunta, alcance=self.alcance_chat.get(), limite_fuentes=10
+                    pregunta,
+                    alcance=self.alcance_chat.get(),
+                    limite_fuentes=10,
                 )
                 self.after(0, self._mostrar_respuesta, respuesta)
             except Exception as exc:
@@ -326,12 +382,15 @@ class ArgosApp(AsistenteClasesApp):
         self.estado_chat.configure(
             text=f"Respuesta documental basada en {len(respuesta.fuentes)} fuentes."
         )
-        for i, fuente in enumerate(respuesta.fuentes, 1):
+        for numero, fuente in enumerate(respuesta.fuentes, 1):
             fila = ctk.CTkFrame(self.fuentes_chat)
             fila.pack(fill="x", pady=3)
             ctk.CTkLabel(
                 fila,
-                text=f"[{i}] {fuente.categoria} · {fuente.titulo} · {fuente.ubicacion}",
+                text=(
+                    f"[{numero}] {fuente.categoria} · {fuente.titulo} · "
+                    f"{fuente.ubicacion}"
+                ),
                 anchor="w",
             ).pack(side="left", fill="x", expand=True, padx=10, pady=8)
             ctk.CTkButton(
