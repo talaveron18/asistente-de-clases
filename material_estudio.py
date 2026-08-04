@@ -29,7 +29,6 @@ def generar_material_estudio(carpeta: str | Path) -> dict:
         if not bloque.get("preguntas"):
             preguntas.append((f"Explica los puntos esenciales de {titulo}.", bloque.get("inicio", ""), titulo))
 
-    # Eliminar duplicados conservando orden.
     vistos = set()
     flashcards_unicas = []
     for frente, dorso, minuto in flashcards:
@@ -65,11 +64,81 @@ def generar_material_estudio(carpeta: str | Path) -> dict:
         ]
     (carpeta / "repaso_rapido.md").write_text("\n".join(hoja), encoding="utf-8")
 
+    docx_generado = _generar_docx(carpeta, datos, preguntas, flashcards_unicas)
+    archivos = ["flashcards_argos.tsv", "preguntas_repaso.md", "repaso_rapido.md"]
+    if docx_generado:
+        archivos.append("apuntes_argos.docx")
+
     return {
         "flashcards": len(flashcards_unicas),
         "preguntas": len(preguntas),
-        "archivos": ["flashcards_argos.tsv", "preguntas_repaso.md", "repaso_rapido.md"],
+        "archivos": archivos,
     }
+
+
+def _generar_docx(carpeta: Path, datos: dict, preguntas: list, flashcards: list) -> bool:
+    try:
+        from docx import Document
+        from docx.shared import Pt
+    except ImportError:
+        return False
+
+    doc = Document()
+    estilos = doc.styles
+    estilos["Normal"].font.name = "Aptos"
+    estilos["Normal"].font.size = Pt(10.5)
+
+    doc.add_heading(datos.get("titulo", "Clase"), 0)
+    doc.add_paragraph(f"Materia: {datos.get('materia', '')}")
+    doc.add_paragraph("Documento generado automáticamente a partir de la transcripción. Requiere revisión.")
+
+    doc.add_heading("Conceptos dominantes", level=1)
+    doc.add_paragraph(", ".join(datos.get("palabras_clave_globales", [])) or "No detectados.")
+
+    doc.add_heading("Índice temporal", level=1)
+    for bloque in datos.get("bloques", []):
+        doc.add_paragraph(
+            f"{bloque.get('inicio')}–{bloque.get('fin')} · {bloque.get('titulo')}",
+            style="List Bullet",
+        )
+
+    doc.add_heading("Apuntes por bloques", level=1)
+    for bloque in datos.get("bloques", []):
+        doc.add_heading(f"{bloque.get('numero')}. {bloque.get('titulo')}", level=2)
+        doc.add_paragraph(f"Referencia: {bloque.get('inicio')}–{bloque.get('fin')}")
+        doc.add_heading("Resumen", level=3)
+        doc.add_paragraph(bloque.get("resumen", "") or "Sin resumen automático.")
+        doc.add_heading("Conceptos clave", level=3)
+        doc.add_paragraph(", ".join(bloque.get("palabras_clave", [])) or "—")
+        if bloque.get("avisos_examen"):
+            doc.add_heading("Avisos de examen", level=3)
+            for aviso in bloque["avisos_examen"]:
+                doc.add_paragraph(aviso, style="List Bullet")
+        if bloque.get("preguntas"):
+            doc.add_heading("Preguntas formuladas", level=3)
+            for pregunta in bloque["preguntas"]:
+                doc.add_paragraph(pregunta, style="List Bullet")
+        doc.add_heading("Desarrollo limpio", level=3)
+        doc.add_paragraph(bloque.get("texto", ""))
+
+    doc.add_heading("Preguntas de repaso", level=1)
+    for pregunta, minuto, bloque in preguntas:
+        doc.add_paragraph(f"{pregunta} ({bloque}, {minuto})", style="List Number")
+
+    doc.add_heading("Flashcards", level=1)
+    tabla = doc.add_table(rows=1, cols=3)
+    tabla.style = "Table Grid"
+    tabla.rows[0].cells[0].text = "Frente"
+    tabla.rows[0].cells[1].text = "Dorso"
+    tabla.rows[0].cells[2].text = "Minuto"
+    for frente, dorso, minuto in flashcards:
+        celdas = tabla.add_row().cells
+        celdas[0].text = frente
+        celdas[1].text = dorso
+        celdas[2].text = minuto
+
+    doc.save(carpeta / "apuntes_argos.docx")
+    return True
 
 
 def _frase_relevante(texto: str, palabra: str) -> str:
