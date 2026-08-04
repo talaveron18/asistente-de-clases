@@ -301,7 +301,14 @@ class AsistenteClasesApp(ctk.CTk):
     def _tab_configuracion(self):
         marco = ctk.CTkScrollableFrame(self.tab_config)
         marco.pack(fill="both", expand=True, padx=14, pady=14)
-        ctk.CTkLabel(marco, text="Token de Hugging Face (opcional)", anchor="w").pack(fill="x", pady=(8, 4))
+        ctk.CTkLabel(
+            marco,
+            text=(
+                "Token de Hugging Face (solo desarrollo; la diarización no "
+                "está incluida en el instalador básico)"
+            ),
+            anchor="w",
+        ).pack(fill="x", pady=(8, 4))
         self.token = ctk.CTkEntry(marco, show="*")
         self.token.pack(fill="x", pady=(0, 12))
         self.token.insert(0, self.config_obj.hf_token)

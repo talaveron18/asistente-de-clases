@@ -25,3 +25,22 @@ def ruta_extraccion_de(
         return None
     recuperada = Path(raiz_biblioteca) / "_indice_texto" / f"{item_id}.json"
     return recuperada if recuperada.exists() else None
+
+
+def ruta_documento_de(
+    item: dict,
+    raiz_biblioteca: str | Path,
+) -> Path | None:
+    """Resuelve el original aunque la biblioteca completa haya cambiado de ruta."""
+    guardada = str(item.get("ruta") or "").strip()
+    if guardada:
+        ruta = Path(guardada)
+        if ruta.exists():
+            return ruta
+
+    categoria = str(item.get("categoria") or "Otros").strip() or "Otros"
+    nombre = str(item.get("nombre") or "").strip()
+    if not nombre:
+        return None
+    recuperada = Path(raiz_biblioteca) / categoria / nombre
+    return recuperada if recuperada.exists() else None

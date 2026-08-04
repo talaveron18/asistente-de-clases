@@ -7,8 +7,19 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from extracciones import ruta_extraccion_de
+from extracciones import ruta_documento_de, ruta_extraccion_de
 from transcripciones import fuente_vigente, procedencia
+
+
+_LOCKS_GUARD = threading.Lock()
+_LOCKS_RECONSTRUCCION: dict[str, threading.RLock] = {}
+
+
+def _lock_reconstruccion(ruta: Path) -> threading.RLock:
+    """Comparte el bloqueo entre todas las instancias del mismo proceso."""
+    clave = str(ruta.resolve())
+    with _LOCKS_GUARD:
+        return _LOCKS_RECONSTRUCCION.setdefault(clave, threading.RLock())
 
 
 @dataclass
@@ -37,12 +48,13 @@ class IndiceConocimientoSQLite:
         )
         self.raiz.mkdir(parents=True, exist_ok=True)
         self.db_path = self.raiz / "argos_conocimiento.sqlite3"
-        self._lock = threading.RLock()
+        self._lock = _lock_reconstruccion(self.db_path)
         self._crear_esquema()
 
     def _conectar(self):
-        conexion = sqlite3.connect(self.db_path, timeout=30)
+        conexion = sqlite3.connect(self.db_path, timeout=300)
         conexion.row_factory = sqlite3.Row
+        conexion.execute("PRAGMA busy_timeout=300000")
         return conexion
 
     def _crear_esquema(self):
@@ -95,12 +107,17 @@ class IndiceConocimientoSQLite:
         return " OR ".join(dict.fromkeys(partes))
 
     def reconstruir(self, callback=None) -> dict:
-        """Reconstruye el índice dentro de una única sección crítica."""
+        """Reconstruye el índice en una sección crítica local e interproceso.
+
+        ``BEGIN IMMEDIATE`` se toma antes de leer las fuentes. De esta forma
+        otra ventana no puede iniciar una segunda reconstrucción mientras la
+        primera aún está recorriendo clases y documentos.
+        """
         with self._lock:
-            registros = [*self._leer_clases(), *self._leer_documentos()]
-            total = max(1, len(registros))
             with self._conectar() as con:
                 con.execute("BEGIN IMMEDIATE")
+                registros = [*self._leer_clases(), *self._leer_documentos()]
+                total = max(1, len(registros))
                 con.execute("DELETE FROM conocimiento")
                 for indice, registro in enumerate(registros, 1):
                     con.execute(
@@ -208,6 +225,7 @@ class IndiceConocimientoSQLite:
                 if not texto:
                     continue
                 numero = int(pagina.get("pagina", 1))
+                ruta_original = ruta_documento_de(item, raiz_biblioteca)
                 registros.append(
                     {
                         "id": f"doc:{item.get('id')}:{numero}",
@@ -217,7 +235,7 @@ class IndiceConocimientoSQLite:
                         "materia": "",
                         "ubicacion": f"Página {numero}",
                         "contenido": texto,
-                        "ruta": item.get("ruta", ""),
+                        "ruta": str(ruta_original or item.get("ruta", "")),
                         "pagina": numero,
                     }
                 )
@@ -245,7 +263,7 @@ class IndiceConocimientoSQLite:
         extra = " AND " + " AND ".join(filtros) if filtros else ""
         sql = f"""
             SELECT tipo_fuente, categoria, titulo, materia, ubicacion,
-                   snippet(conocimiento, 6, '⟦', '⟧', ' … ', 38) AS fragmento,
+                   snippet(conocimiento, 6, '', '', ' … ', 38) AS fragmento,
                    ruta, pagina, minuto, bm25(conocimiento) AS rango
             FROM conocimiento
             WHERE conocimiento MATCH ? {extra}
@@ -253,11 +271,8 @@ class IndiceConocimientoSQLite:
             LIMIT ?
         """
         parametros.append(max(1, limite))
-        try:
-            with self._conectar() as con:
-                filas = con.execute(sql, parametros).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        with self._conectar() as con:
+            filas = con.execute(sql, parametros).fetchall()
         return [
             CoincidenciaFTS(
                 tipo_fuente=fila["tipo_fuente"],

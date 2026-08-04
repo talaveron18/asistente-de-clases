@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -27,6 +29,58 @@ class _BloqueoClase:
         self.ruta = carpeta / ".argos_procesando.lock"
         self.caducidad = caducidad_horas * 3600
         self._descriptor: int | None = None
+        self._token: str | None = None
+
+    @staticmethod
+    def _pid_activo(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if pid == os.getpid():
+            return True
+        if os.name != "nt":
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            except OSError:
+                return False
+            return True
+
+        # En Windows OpenProcess permite comprobar existencia sin terminar ni
+        # señalizar el proceso. Acceso denegado significa que el PID existe.
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information, False, pid
+        )
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return ctypes.windll.kernel32.GetLastError() != 87  # PID inexistente
+
+    def _es_obsoleto(self) -> bool:
+        try:
+            antiguedad = max(0.0, time.time() - self.ruta.stat().st_mtime)
+        except OSError:
+            return False
+        try:
+            datos = json.loads(self.ruta.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # Un proceso puede caer entre O_EXCL y la escritura. El margen
+            # evita retirar un fichero que todavía se está inicializando.
+            return antiguedad > 60
+
+        host = str(datos.get("host") or "")
+        try:
+            pid = int(datos.get("pid"))
+        except (TypeError, ValueError):
+            pid = 0
+        if not host or host == socket.gethostname():
+            return not self._pid_activo(pid)
+        return antiguedad > self.caducidad
 
     def __enter__(self):
         for intento in range(2):
@@ -35,21 +89,21 @@ class _BloqueoClase:
                     self.ruta,
                     os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                 )
+                self._token = uuid.uuid4().hex
                 contenido = json.dumps(
                     {
                         "pid": os.getpid(),
+                        "host": socket.gethostname(),
                         "inicio": datetime.now().isoformat(timespec="seconds"),
+                        "token": self._token,
                     },
                     ensure_ascii=False,
                 ).encode("utf-8")
                 os.write(self._descriptor, contenido)
+                os.fsync(self._descriptor)
                 return self
             except FileExistsError as exc:
-                try:
-                    antiguedad = time.time() - self.ruta.stat().st_mtime
-                except OSError:
-                    antiguedad = 0
-                if intento == 0 and antiguedad > self.caducidad:
+                if intento == 0 and self._es_obsoleto():
                     try:
                         self.ruta.unlink()
                     except OSError:
@@ -58,6 +112,18 @@ class _BloqueoClase:
                 raise ClaseEnProcesoError(
                     "Esta clase ya está siendo procesada por otra ventana de ARGOS."
                 ) from exc
+            except Exception:
+                if self._descriptor is not None:
+                    try:
+                        os.close(self._descriptor)
+                    except OSError:
+                        pass
+                    self._descriptor = None
+                try:
+                    self.ruta.unlink()
+                except OSError:
+                    pass
+                raise
         raise ClaseEnProcesoError("No se pudo bloquear la clase.")
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -68,8 +134,10 @@ class _BloqueoClase:
                 pass
             self._descriptor = None
         try:
-            self.ruta.unlink()
-        except OSError:
+            datos = json.loads(self.ruta.read_text(encoding="utf-8"))
+            if datos.get("token") == self._token:
+                self.ruta.unlink()
+        except (OSError, json.JSONDecodeError):
             pass
 
 

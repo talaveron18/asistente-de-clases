@@ -96,6 +96,10 @@ También puede utilizarse `EJECUTAR.bat`.
 - Flashcards TSV y preguntas de repaso.
 - Corrección médica mediante glosario explícito y registro de cambios.
 
+La diarización no forma parte del instalador básico: Pyannote, PyTorch y sus
+dependencias solo se instalan en el entorno de desarrollo. El instalador
+transcribe con Faster-Whisper y asigna una única voz docente.
+
 ## Privacidad
 
 El contenido se procesa y almacena localmente. Los modelos de transcripción pueden descargarse la primera vez que se utilizan.
