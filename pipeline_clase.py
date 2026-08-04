@@ -3,26 +3,28 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 STOPWORDS = {
-    "para","como","pero","porque","desde","hasta","sobre","entre","cuando","donde","este","esta","estos","estas",
-    "esto","eso","esa","ese","unos","unas","tambien","entonces","vamos","ahora","bueno","bien","muy","mas",
-    "menos","cada","todo","toda","todos","todas","del","las","los","una","uno","que","con","sin","por","se",
-    "es","son","ser","ha","hay","al","lo","la","el","en","y","o","a","de","un","ya","si","no"
+    "para", "como", "pero", "porque", "desde", "hasta", "sobre", "entre", "cuando", "donde",
+    "este", "esta", "estos", "estas", "esto", "eso", "esa", "ese", "unos", "unas", "tambien",
+    "entonces", "vamos", "ahora", "bueno", "bien", "muy", "mas", "menos", "cada", "todo",
+    "toda", "todos", "todas", "del", "las", "los", "una", "uno", "que", "con", "sin", "por",
+    "se", "es", "son", "ser", "ha", "hay", "al", "lo", "la", "el", "en", "y", "o", "a",
+    "de", "un", "ya", "si", "no",
 }
-MULETILLAS = [
-    r"\b(?:eh+|em+|mmm+|este+|bueno|vale|o sea|digamos|básicamente|literalmente)\b[,. ]*",
-]
+MULETILLAS = [r"\b(?:eh+|em+|mmm+|este+|bueno|vale|o sea|digamos|básicamente|literalmente)\b[,. ]*"]
 MARCADORES_TEMA = [
     "ahora vamos a", "pasamos a", "vamos a ver", "continuamos con", "el siguiente tema",
-    "por otro lado", "a continuación", "para terminar", "en cuanto a", "respecto a"
+    "por otro lado", "a continuación", "para terminar", "en cuanto a", "respecto a",
 ]
 MARCADORES_EXAMEN = [
-    "esto entra", "entra en el examen", "de cara al examen", "puede caer", "suele caer", "lo preguntan",
-    "esto es importante", "muy importante", "ojo con", "atención a", "no os olvidéis", "no se olviden"
+    "esto entra", "entra en el examen", "de cara al examen", "puede caer", "suele caer",
+    "lo preguntan", "esto es importante", "muy importante", "ojo con", "atención a",
+    "no os olvidéis", "no se olviden",
 ]
+
 
 @dataclass
 class BloqueTematico:
@@ -100,9 +102,11 @@ def _resumen_extractivo(textos: list[str], max_frases=5) -> str:
 
 def analizar_clase_completa(carpeta: str | Path, minutos_bloque: int = 12) -> dict:
     carpeta = Path(carpeta)
-    transcripcion = carpeta / "transcripcion.txt"
+    revisada = carpeta / "transcripcion_medica_revisada.txt"
+    transcripcion = revisada if revisada.exists() else carpeta / "transcripcion.txt"
     if not transcripcion.exists():
         raise FileNotFoundError(transcripcion)
+
     entradas = [_parse_linea(x) for x in transcripcion.read_text(encoding="utf-8", errors="replace").splitlines()]
     entradas = [x for x in entradas if x and x["texto"]]
     if not entradas:
@@ -143,6 +147,7 @@ def analizar_clase_completa(carpeta: str | Path, minutos_bloque: int = 12) -> di
     resultado = {
         "materia": ficha.get("materia", carpeta.parent.name),
         "titulo": ficha.get("titulo", carpeta.name),
+        "fuente_transcripcion": transcripcion.name,
         "bloques": [asdict(b) for b in bloques],
         "avisos_examen": avisos_globales,
         "preguntas_profesor": preguntas_globales,
@@ -150,7 +155,10 @@ def analizar_clase_completa(carpeta: str | Path, minutos_bloque: int = 12) -> di
     }
     (carpeta / "pipeline_clase.json").write_text(json.dumps(resultado, ensure_ascii=False, indent=2), encoding="utf-8")
     (carpeta / "apuntes_argos.md").write_text(_generar_markdown_argos(resultado), encoding="utf-8")
-    (carpeta / "transcripcion_limpia.txt").write_text("\n".join(f"[{x['tiempo']}] {x['rol']}: {limpiar_texto(x['texto'])}" for x in entradas), encoding="utf-8")
+    (carpeta / "transcripcion_limpia.txt").write_text(
+        "\n".join(f"[{x['tiempo']}] {x['rol']}: {limpiar_texto(x['texto'])}" for x in entradas),
+        encoding="utf-8",
+    )
     return resultado
 
 
