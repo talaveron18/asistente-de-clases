@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from extracciones import ruta_extraccion_de
 from transcripciones import fuente_vigente, procedencia
 
 
@@ -35,6 +37,7 @@ class IndiceConocimientoSQLite:
         )
         self.raiz.mkdir(parents=True, exist_ok=True)
         self.db_path = self.raiz / "argos_conocimiento.sqlite3"
+        self._lock = threading.RLock()
         self._crear_esquema()
 
     def _conectar(self):
@@ -73,8 +76,11 @@ class IndiceConocimientoSQLite:
 
     @staticmethod
     def _consulta_fts(consulta: str) -> str:
-        terminos = re.findall(r"[\wáéíóúüñÁÉÍÓÚÜÑ]+", consulta)
-        terminos = [t for t in terminos if len(t) > 1]
+        terminos = [
+            t
+            for t in re.findall(r"[\wáéíóúüñÁÉÍÓÚÜÑ]+", consulta)
+            if len(t) > 1
+        ]
         if not terminos:
             return '"' + consulta.replace('"', '""') + '"'
 
@@ -89,47 +95,51 @@ class IndiceConocimientoSQLite:
         return " OR ".join(dict.fromkeys(partes))
 
     def reconstruir(self, callback=None) -> dict:
-        registros = [*self._leer_clases(), *self._leer_documentos()]
-        total = max(1, len(registros))
-        with self._conectar() as con:
-            con.execute("DELETE FROM conocimiento")
-            for i, registro in enumerate(registros, 1):
-                con.execute(
-                    "INSERT INTO conocimiento VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        registro["id"],
-                        registro["tipo_fuente"],
-                        registro["categoria"],
-                        registro["titulo"],
-                        registro["materia"],
-                        registro["ubicacion"],
-                        registro["contenido"],
-                        registro["ruta"],
-                        registro.get("pagina"),
-                        registro.get("minuto"),
-                    ),
-                )
-                if callback and (i == total or i % 25 == 0):
-                    callback(
-                        f"Indexando {i} de {total} bloques...", i / total
+        """Reconstruye el índice dentro de una única sección crítica."""
+        with self._lock:
+            registros = [*self._leer_clases(), *self._leer_documentos()]
+            total = max(1, len(registros))
+            with self._conectar() as con:
+                con.execute("BEGIN IMMEDIATE")
+                con.execute("DELETE FROM conocimiento")
+                for indice, registro in enumerate(registros, 1):
+                    con.execute(
+                        "INSERT INTO conocimiento VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            registro["id"],
+                            registro["tipo_fuente"],
+                            registro["categoria"],
+                            registro["titulo"],
+                            registro["materia"],
+                            registro["ubicacion"],
+                            registro["contenido"],
+                            registro["ruta"],
+                            registro.get("pagina"),
+                            registro.get("minuto"),
+                        ),
                     )
-            con.execute(
-                "INSERT OR REPLACE INTO metadatos(clave, valor) "
-                "VALUES ('total_bloques', ?)",
-                (str(len(registros)),),
-            )
-        return {
-            "bloques": len(registros),
-            "clases": sum(
-                r["tipo_fuente"] == "Clase" for r in registros
-            ),
-            "documentos": sum(
-                r["tipo_fuente"] != "Clase" for r in registros
-            ),
-        }
+                    if callback and (indice == total or indice % 25 == 0):
+                        callback(
+                            f"Indexando {indice} de {total} bloques...",
+                            indice / total,
+                        )
+                con.execute(
+                    "INSERT OR REPLACE INTO metadatos(clave, valor) "
+                    "VALUES ('total_bloques', ?)",
+                    (str(len(registros)),),
+                )
+            return {
+                "bloques": len(registros),
+                "clases": sum(
+                    r["tipo_fuente"] == "Clase" for r in registros
+                ),
+                "documentos": sum(
+                    r["tipo_fuente"] != "Clase" for r in registros
+                ),
+            }
 
-    def _leer_clases(self):
-        registros = []
+    def _leer_clases(self) -> list[dict]:
+        registros: list[dict] = []
         for ficha_path in self.raiz.rglob("ficha.json"):
             if "Biblioteca médica" in ficha_path.parts:
                 continue
@@ -145,8 +155,11 @@ class IndiceConocimientoSQLite:
 
             materia = ficha.get("materia", carpeta.parent.name)
             titulo = ficha.get("titulo", carpeta.name)
-            es_revisada = procedencia(carpeta) == "clase/revisada"
-            etiqueta_fuente = "revisión médica" if es_revisada else "original"
+            etiqueta = (
+                "revisión médica"
+                if procedencia(carpeta) == "clase/revisada"
+                else "original"
+            )
             for numero_linea, linea in enumerate(lineas):
                 if not linea.strip():
                     continue
@@ -160,8 +173,7 @@ class IndiceConocimientoSQLite:
                         "titulo": titulo,
                         "materia": materia,
                         "ubicacion": (
-                            f"{materia} · {minuto or 'sin minuto'} · "
-                            f"{etiqueta_fuente}"
+                            f"{materia} · {minuto or 'sin minuto'} · {etiqueta}"
                         ),
                         "contenido": linea,
                         "ruta": str(carpeta),
@@ -170,32 +182,25 @@ class IndiceConocimientoSQLite:
                 )
         return registros
 
-    def _leer_documentos(self):
-        indice_path = (
-            self.raiz / "Biblioteca médica" / "indice_biblioteca.json"
-        )
+    def _leer_documentos(self) -> list[dict]:
+        raiz_biblioteca = self.raiz / "Biblioteca médica"
+        indice_path = raiz_biblioteca / "indice_biblioteca.json"
         if not indice_path.exists():
             return []
         try:
-            indice = json.loads(indice_path.read_text(encoding="utf-8"))
+            items = json.loads(indice_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
 
-        registros = []
-        for item in indice:
+        registros: list[dict] = []
+        for item in items:
             if item.get("estado_indice_ia") != "texto_extraido":
                 continue
-            ruta_indice = (
-                item.get("ruta_extraccion")
-                or item.get("ruta_indice_texto")
-                or item.get("indice_texto")
-            )
-            if not ruta_indice or not Path(ruta_indice).exists():
+            ruta_indice = ruta_extraccion_de(item, raiz_biblioteca)
+            if ruta_indice is None:
                 continue
             try:
-                extraccion = json.loads(
-                    Path(ruta_indice).read_text(encoding="utf-8")
-                )
+                extraccion = json.loads(ruta_indice.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
             for pagina in extraccion.get("paginas", []):
@@ -227,31 +232,30 @@ class IndiceConocimientoSQLite:
         consulta = consulta.strip()
         if len(consulta) < 2:
             return []
-        filtros = []
-        params: list[object] = [self._consulta_fts(consulta)]
+
+        filtros: list[str] = []
+        parametros: list[object] = [self._consulta_fts(consulta)]
         if alcance == "Clases":
             filtros.append("tipo_fuente = 'Clase'")
         elif alcance == "Biblioteca médica":
             filtros.append("tipo_fuente = 'Documento'")
         elif alcance not in {"Todo", ""}:
             filtros.append("categoria = ?")
-            params.append(alcance)
-        where_extra = (
-            " AND " + " AND ".join(filtros) if filtros else ""
-        )
+            parametros.append(alcance)
+        extra = " AND " + " AND ".join(filtros) if filtros else ""
         sql = f"""
             SELECT tipo_fuente, categoria, titulo, materia, ubicacion,
                    snippet(conocimiento, 6, '⟦', '⟧', ' … ', 38) AS fragmento,
                    ruta, pagina, minuto, bm25(conocimiento) AS rango
             FROM conocimiento
-            WHERE conocimiento MATCH ? {where_extra}
+            WHERE conocimiento MATCH ? {extra}
             ORDER BY rango
             LIMIT ?
         """
-        params.append(max(1, limite))
+        parametros.append(max(1, limite))
         try:
             with self._conectar() as con:
-                filas = con.execute(sql, params).fetchall()
+                filas = con.execute(sql, parametros).fetchall()
         except sqlite3.OperationalError:
             return []
         return [
