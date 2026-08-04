@@ -4,39 +4,56 @@ Aplicación local para grabar o importar clases de Medicina, transcribirlas, org
 
 ## Aplicación única
 
-El único punto de entrada es:
+El punto de entrada distribuible es:
 
 ```text
 argos_app.py
 ```
 
-`main.py` contiene el núcleo reutilizable de grabación, transcripción, biblioteca y configuración. Ya no existen `main_v2.py`, `main_v3.py` ni versiones heredadas sucesivas.
+`main.py` conserva únicamente el núcleo reutilizable de grabación, transcripción, biblioteca y configuración. Ya no existen aplicaciones `main_v2.py`–`main_v7.py` ni una cadena de herencias sucesivas.
 
-## Flujo de una clase
+## Pipeline único
+
+Toda clase nueva o reprocesada pasa por `OrquestadorArgos` y una sola cola:
 
 ```text
 Audio o vídeo
-→ Transcripción
-→ Organización por materia
+→ Transcripción original
+→ Corrección médica conservadora
+→ Selección de transcripción vigente
 → Limpieza y división temática
-→ Corrección médica auditable
-→ Apuntes y Word
-→ Flashcards y preguntas
+→ Apuntes, Word, flashcards y preguntas
+→ Actualización del índice SQLite FTS5
 → Referencias de la biblioteca local
-→ Índice SQLite FTS5
 ```
+
+Reglas:
+
+- La corrección siempre parte de `transcripcion.txt`.
+- `transcripcion_limpia.txt` es una salida y nunca vuelve a utilizarse como entrada.
+- El pipeline, los apuntes, el índice y el chat utilizan `transcripcion_medica_revisada.txt` cuando está actualizada.
+- Cada clase genera `estado_argos.json` con el resultado de cada etapa.
+- Una cola dentro de la aplicación y un bloqueo en la carpeta impiden reprocesamientos simultáneos.
+
+## Búsqueda única
+
+El único motor de recuperación es:
+
+```text
+indice_sqlite.py · SQLite FTS5
+```
+
+`chat_argos.py` y `enriquecedor_argos.py` son consumidores de ese índice. No mantienen buscadores ni bases paralelas.
 
 ## Instalación para Windows
 
-El usuario final solo necesita un archivo:
+El usuario final solo necesita:
 
 ```text
 ARGOS-Setup.exe
 ```
 
-El instalador incluye ARGOS y FFmpeg. No requiere Python ni una instalación manual de FFmpeg.
-
-La cadena oficial de construcción es única:
+La cadena oficial de construcción es:
 
 ```text
 argos_app.py
@@ -45,13 +62,13 @@ argos_app.py
 → release/ARGOS-Setup.exe
 ```
 
+El instalador incluye ARGOS y FFmpeg. No requiere Python ni una instalación manual de FFmpeg.
+
 El único workflow es:
 
 ```text
 .github/workflows/windows-installer.yml
 ```
-
-Cuando se ejecute correctamente en la rama `main`, publicará el instalador como artefacto y como Release `latest`.
 
 ## Ejecución desde el código fuente
 
@@ -85,4 +102,4 @@ El contenido se procesa y almacena localmente. Los modelos de transcripción pue
 
 ## Estado
 
-ARGOS continúa en fase alfa. El instalador debe considerarse validado únicamente después de que el workflow finalice correctamente y el `ARGOS-Setup.exe` se pruebe en un equipo Windows limpio.
+ARGOS continúa en fase alfa. El instalador solo debe considerarse validado después de que el workflow finalice correctamente y `ARGOS-Setup.exe` se pruebe en un equipo Windows limpio.
