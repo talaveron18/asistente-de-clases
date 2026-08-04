@@ -24,6 +24,50 @@ class ArgosV5App(ArgosV4App):
         self._tab_pipeline_clase()
         self._tab_reuniones_simple()
 
+    def _mostrar_resultados(self, caja, segmentos, carpeta):
+        """Conserva la salida original y lanza el pipeline completo automáticamente."""
+        caja.delete("1.0", "end")
+        caja.insert(
+            "end",
+            "\n".join(s.a_linea_txt() for s in segmentos)
+            if segmentos else "No se detectó voz.",
+        )
+        self.progreso_grabar.set(0)
+        self.progreso_archivo.set(0)
+        self.estado.configure(text="Transcripción guardada. Generando apuntes ARGOS...")
+        self._refrescar_clases()
+
+        def worker():
+            try:
+                datos = analizar_clase_completa(carpeta)
+                self.indice_auto.reconstruir()
+                self.after(0, self._actualizar_clases_pipeline)
+                self.after(0, self._finalizar_automatico, carpeta, datos)
+            except Exception as exc:
+                self.after(
+                    0,
+                    messagebox.showwarning,
+                    "Clase guardada con aviso",
+                    f"La transcripción se guardó, pero el análisis automático falló:\n{exc}",
+                )
+                self.after(0, self.estado.configure, {"text": f"Clase guardada; análisis pendiente: {exc}"})
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finalizar_automatico(self, carpeta, datos):
+        self.estado.configure(
+            text=(
+                f"Clase completa: {len(datos.get('bloques', []))} bloques, "
+                f"{len(datos.get('avisos_examen', []))} avisos y "
+                f"{len(datos.get('preguntas_profesor', []))} preguntas."
+            )
+        )
+        messagebox.showinfo(
+            "ARGOS",
+            "Clase transcrita, analizada, convertida en apuntes e indexada.\n\n"
+            f"Guardada en:\n{carpeta}",
+        )
+
     def _tab_pipeline_clase(self):
         superior = ctk.CTkFrame(self.tab_pipeline)
         superior.pack(fill="x", padx=14, pady=14)
@@ -35,8 +79,8 @@ class ArgosV5App(ArgosV4App):
         ctk.CTkLabel(
             superior,
             text=(
-                "Genera transcripción limpia, bloques temáticos, resúmenes, palabras clave, "
-                "preguntas del profesor, avisos de examen y apuntes ARGOS."
+                "Las clases nuevas se procesan automáticamente. Esta pantalla permite "
+                "reprocesar clases antiguas o regenerar sus apuntes."
             ),
             text_color="#aaaaaa",
             anchor="w",
@@ -49,7 +93,7 @@ class ArgosV5App(ArgosV4App):
         self.clase_pipeline = ctk.CTkComboBox(fila, values=self._opciones_clases_pipeline(), width=560)
         self.clase_pipeline.pack(side="left", fill="x", expand=True)
         ctk.CTkButton(fila, text="Actualizar", command=self._actualizar_clases_pipeline, width=90).pack(side="left", padx=6)
-        ctk.CTkButton(fila, text="Procesar", command=self._procesar_clase_seleccionada, width=100).pack(side="left")
+        ctk.CTkButton(fila, text="Reprocesar", command=self._procesar_clase_seleccionada, width=100).pack(side="left")
 
         self.estado_pipeline = ctk.CTkLabel(self.tab_pipeline, text="Selecciona una clase.", anchor="w")
         self.estado_pipeline.pack(fill="x", padx=18, pady=(0, 8))
@@ -133,8 +177,7 @@ class ArgosV5App(ArgosV4App):
             panel,
             text=(
                 "Las reuniones utilizarán el mismo motor de grabación y transcripción, "
-                "pero se guardarán separadas de Medicina. Esta primera versión delimita "
-                "el espacio sin mezclarlo con clases, tratados ni exámenes."
+                "pero se guardarán separadas de Medicina."
             ),
             justify="left",
             anchor="w",
