@@ -37,3 +37,9 @@ la cola de transcripción incremental.
 - Rojo coral reservado para grabar y detener.
 - Verde para estados correctos y ámbar para trabajos pendientes.
 - Marca tipográfica ARGOS sin mascota ni recursos visuales ajenos.
+
+## Validación de publicación
+
+Toda versión instalable debe superar las pruebas automatizadas, el empaquetado,
+la carga real de Faster-Whisper y el ciclo de instalación y desinstalación en
+Windows antes de entregarse al usuario.
