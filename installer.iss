@@ -1,3 +1,4 @@
+; ARGOS 0.7.0 — interfaz de estudio rediseñada
 #define MyAppName "ARGOS"
 #define MyAppVersion "0.7.0"
 #define MyAppPublisher "Fernando Talaverón"
