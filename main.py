@@ -12,6 +12,21 @@ import customtkinter as ctk
 from biblioteca_medica import BibliotecaMedica, CATEGORIAS
 from config import Config
 from grabador import GrabadorAudio, recuperar_audio_interrumpido
+from interfaz_argos import (
+    COLOR_ACENTO,
+    COLOR_ALERTA,
+    COLOR_BORDE,
+    COLOR_EXITO,
+    COLOR_PANEL,
+    COLOR_PANEL_SUAVE,
+    COLOR_PELIGRO,
+    COLOR_TEXTO,
+    COLOR_TEXTO_SUAVE,
+    NavegacionArgos,
+    leer_material_clase,
+    tarjeta,
+    titulo_seccion,
+)
 from media_utils import eliminar_temporal, preparar_para_transcripcion, tipo_archivo
 from repositorio import RepositorioClases
 from transcriptor import TranscriptorClases
@@ -53,52 +68,189 @@ class AsistenteClasesApp(ctk.CTk):
         self._cargar_modelos()
 
     def _crear_interfaz(self):
-        cabecera = ctk.CTkFrame(self, height=54, corner_radius=0)
-        cabecera.pack(fill="x")
-        cabecera.pack_propagate(False)
-        ctk.CTkLabel(
-            cabecera, text="ARGOS · Asistente de Clases",
-            font=ctk.CTkFont(size=20, weight="bold")
-        ).pack(side="left", padx=18)
-        self.estado_modelos = ctk.CTkLabel(cabecera, text="Preparando...", text_color="#ffb300")
-        self.estado_modelos.pack(side="right", padx=18)
-
-        self.tabs = ctk.CTkTabview(self)
-        self.tabs.pack(fill="both", expand=True, padx=14, pady=12)
-        self.tab_grabar = self.tabs.add("Grabar")
-        self.tab_archivo = self.tabs.add("Audio o vídeo")
-        self.tab_clases = self.tabs.add("Clases")
-        self.tab_medica = self.tabs.add("Biblioteca médica")
+        self.tabs = NavegacionArgos(self)
+        self.tab_inicio = self.tabs.add("Inicio")
+        self.tab_grabar = self.tabs.add("Grabar clase")
+        self.tab_archivo = self.tabs.add("Importar archivo")
+        self.tab_clases = self.tabs.add("Mis clases")
+        self.tab_detalle = self.tabs.add("Detalle de clase", visible=False)
+        self.tab_medica = self.tabs.add("Biblioteca")
         self.tab_config = self.tabs.add("Configuración")
 
+        estado_superior = ctk.CTkFrame(
+            self.tabs.cabecera, fg_color="transparent"
+        )
+        estado_superior.pack(side="right", padx=20, pady=10)
+        self.estado_modelos = ctk.CTkLabel(
+            estado_superior,
+            text="Preparando modelos…",
+            text_color=COLOR_ALERTA,
+            font=ctk.CTkFont(size=12),
+        )
+        self.estado_modelos.pack(side="right", padx=(16, 0))
+        self.btn_detener = ctk.CTkButton(
+            estado_superior,
+            text="Detener y guardar",
+            command=self._detener_grabacion,
+            state="disabled",
+            width=132,
+            height=34,
+            fg_color=COLOR_PELIGRO,
+            hover_color="#D84855",
+        )
+        self.btn_detener.pack(side="right", padx=(12, 0))
+        self.reloj = ctk.CTkLabel(
+            estado_superior,
+            text="00:00:00",
+            text_color=COLOR_TEXTO,
+            font=ctk.CTkFont(size=17, weight="bold"),
+            width=80,
+        )
+        self.reloj.pack(side="right")
+        self.estado_grabacion_global = ctk.CTkLabel(
+            estado_superior,
+            text="●  Sin grabación",
+            text_color=COLOR_TEXTO_SUAVE,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.estado_grabacion_global.pack(side="right", padx=(0, 12))
+
+        self._tab_inicio()
         self._tab_grabacion()
         self._tab_archivo_multimedia()
         self._tab_biblioteca_clases()
+        self._tab_detalle_clase()
         self._tab_biblioteca_medica()
         self._tab_configuracion()
 
-        self.estado = ctk.CTkLabel(self, text="Inicializando...", anchor="w")
-        self.estado.pack(fill="x", padx=16, pady=(0, 10))
+        self.estado = ctk.CTkLabel(
+            self.tabs.menu_pie,
+            text="Inicializando…",
+            anchor="w",
+            justify="left",
+            wraplength=185,
+            text_color=COLOR_TEXTO_SUAVE,
+            font=ctk.CTkFont(size=11),
+        )
+        self.estado.pack(side="bottom", fill="x", padx=8, pady=(12, 4))
+        self.tabs.set("Inicio")
+
+    def _tab_inicio(self):
+        titulo_seccion(
+            self.tab_inicio,
+            "Tu estudio, en un solo lugar",
+            "Graba una clase o importa una grabación. ARGOS conservará el audio, "
+            "transcribirá en directo y organizará el material automáticamente.",
+        )
+
+        acciones = ctk.CTkFrame(self.tab_inicio, fg_color="transparent")
+        acciones.pack(fill="x", padx=24, pady=(2, 18))
+        acciones.grid_columnconfigure(0, weight=1)
+        acciones.grid_columnconfigure(1, weight=1)
+
+        grabar = tarjeta(acciones)
+        grabar.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        ctk.CTkLabel(
+            grabar,
+            text="Grabar una clase",
+            text_color=COLOR_TEXTO,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(18, 4))
+        ctk.CTkLabel(
+            grabar,
+            text="Transcripción y guardado automáticos mientras escuchas.",
+            text_color=COLOR_TEXTO_SUAVE,
+            anchor="w",
+        ).pack(fill="x", padx=18)
+        ctk.CTkButton(
+            grabar,
+            text="Empezar a grabar",
+            command=lambda: self.tabs.set("Grabar clase"),
+            fg_color=COLOR_ACENTO,
+            height=38,
+        ).pack(anchor="w", padx=18, pady=18)
+
+        importar = tarjeta(acciones)
+        importar.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ctk.CTkLabel(
+            importar,
+            text="Importar audio o vídeo",
+            text_color=COLOR_TEXTO,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(18, 4))
+        ctk.CTkLabel(
+            importar,
+            text="Convierte una clase ya grabada en material de estudio.",
+            text_color=COLOR_TEXTO_SUAVE,
+            anchor="w",
+        ).pack(fill="x", padx=18)
+        ctk.CTkButton(
+            importar,
+            text="Seleccionar archivo",
+            command=lambda: self.tabs.set("Importar archivo"),
+            fg_color=COLOR_PANEL_SUAVE,
+            border_width=1,
+            border_color=COLOR_BORDE,
+            height=38,
+        ).pack(anchor="w", padx=18, pady=18)
+
+        recientes = tarjeta(self.tab_inicio)
+        recientes.pack(fill="both", expand=True, padx=24, pady=(0, 22))
+        cabecera = ctk.CTkFrame(recientes, fg_color="transparent")
+        cabecera.pack(fill="x", padx=18, pady=(16, 8))
+        ctk.CTkLabel(
+            cabecera,
+            text="Clases recientes",
+            text_color=COLOR_TEXTO,
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            cabecera,
+            text="Ver todas",
+            command=lambda: self.tabs.set("Mis clases"),
+            width=84,
+            height=30,
+            fg_color="transparent",
+            border_width=1,
+            border_color=COLOR_BORDE,
+        ).pack(side="right")
+        self.lista_inicio = ctk.CTkFrame(recientes, fg_color="transparent")
+        self.lista_inicio.pack(fill="both", expand=True, padx=18, pady=(0, 14))
+        self._refrescar_inicio()
 
     def _campos_clase(self, parent):
-        marco = ctk.CTkFrame(parent)
-        marco.pack(fill="x", padx=14, pady=(14, 8))
-        ctk.CTkLabel(marco, text="Materia").grid(row=0, column=0, padx=(12, 6), pady=10)
+        marco = tarjeta(parent)
+        marco.pack(fill="x", padx=24, pady=(0, 12))
+        ctk.CTkLabel(
+            marco, text="Materia", text_color=COLOR_TEXTO_SUAVE
+        ).grid(row=0, column=0, padx=(16, 6), pady=14)
         materia = ctk.CTkComboBox(marco, values=self.repositorio.materias() or [""], width=260)
-        materia.grid(row=0, column=1, padx=6, pady=10, sticky="ew")
+        materia.grid(row=0, column=1, padx=6, pady=14, sticky="ew")
         materia.set(self.config_obj.ultima_materia or "")
-        ctk.CTkLabel(marco, text="Título").grid(row=0, column=2, padx=(18, 6), pady=10)
+        ctk.CTkLabel(
+            marco, text="Título", text_color=COLOR_TEXTO_SUAVE
+        ).grid(row=0, column=2, padx=(18, 6), pady=14)
         titulo = ctk.CTkEntry(marco, placeholder_text="Ej.: Inflamación aguda")
-        titulo.grid(row=0, column=3, padx=(6, 12), pady=10, sticky="ew")
+        titulo.grid(row=0, column=3, padx=(6, 16), pady=14, sticky="ew")
         marco.grid_columnconfigure(3, weight=1)
         return materia, titulo
 
     def _tab_grabacion(self):
+        titulo_seccion(
+            self.tab_grabar,
+            "Grabar clase",
+            "ARGOS guarda el audio y la transcripción durante la clase. Puedes "
+            "moverte por la aplicación sin perder el control de la grabación.",
+        )
         self.materia_grabar, self.titulo_grabar = self._campos_clase(self.tab_grabar)
-        panel = ctk.CTkFrame(self.tab_grabar)
-        panel.pack(fill="x", padx=14, pady=(0, 10))
-        ctk.CTkLabel(panel, text="Entrada automática:").pack(
-            side="left", padx=(12, 6), pady=12
+        panel = tarjeta(self.tab_grabar)
+        panel.pack(fill="x", padx=24, pady=(0, 12))
+        ctk.CTkLabel(
+            panel, text="Entrada automática", text_color=COLOR_TEXTO_SUAVE
+        ).pack(
+            side="left", padx=(16, 8), pady=14
         )
         self.etiqueta_micro = ctk.CTkLabel(
             panel, text="Detectando hardware de audio…", anchor="w"
@@ -107,20 +259,24 @@ class AsistenteClasesApp(ctk.CTk):
         self._detectar_hardware_audio()
 
         controles = ctk.CTkFrame(self.tab_grabar, fg_color="transparent")
-        controles.pack(fill="x", padx=14)
+        controles.pack(fill="x", padx=24)
         self.btn_grabar = ctk.CTkButton(
-            controles, text="Iniciar grabación", command=self._iniciar_grabacion, fg_color="#c62828"
+            controles,
+            text="●  Iniciar grabación",
+            command=self._iniciar_grabacion,
+            fg_color=COLOR_PELIGRO,
+            hover_color="#D84855",
+            width=180,
+            height=42,
         )
         self.btn_grabar.pack(side="left", padx=(0, 8))
-        self.btn_detener = ctk.CTkButton(
-            controles, text="Detener y guardar",
-            command=self._detener_grabacion, state="disabled", fg_color="#2e7d32"
-        )
-        self.btn_detener.pack(side="left")
-        self.reloj = ctk.CTkLabel(controles, text="00:00:00", font=ctk.CTkFont(size=20, weight="bold"))
-        self.reloj.pack(side="right")
+        ctk.CTkLabel(
+            controles,
+            text="El botón para detener permanece siempre en la barra superior.",
+            text_color=COLOR_TEXTO_SUAVE,
+        ).pack(side="left", padx=8)
         fila_nivel = ctk.CTkFrame(self.tab_grabar, fg_color="transparent")
-        fila_nivel.pack(fill="x", padx=14, pady=12)
+        fila_nivel.pack(fill="x", padx=24, pady=12)
         self.nivel = ctk.CTkProgressBar(fila_nivel)
         self.nivel.pack(side="left", fill="x", expand=True)
         self.nivel.set(0)
@@ -129,10 +285,23 @@ class AsistenteClasesApp(ctk.CTk):
         )
         self.etiqueta_nivel.pack(side="right", padx=(10, 0))
         self.progreso_grabar = ctk.CTkProgressBar(self.tab_grabar)
-        self.progreso_grabar.pack(fill="x", padx=14, pady=(0, 10))
+        self.progreso_grabar.pack(fill="x", padx=24, pady=(0, 10))
         self.progreso_grabar.set(0)
-        self.texto_grabar = ctk.CTkTextbox(self.tab_grabar, font=ctk.CTkFont(size=13))
-        self.texto_grabar.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        ctk.CTkLabel(
+            self.tab_grabar,
+            text="Transcripción en directo",
+            text_color=COLOR_TEXTO,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", padx=24, pady=(2, 6))
+        self.texto_grabar = ctk.CTkTextbox(
+            self.tab_grabar,
+            font=ctk.CTkFont(size=14),
+            fg_color=COLOR_PANEL,
+            border_width=1,
+            border_color=COLOR_BORDE,
+        )
+        self.texto_grabar.pack(fill="both", expand=True, padx=24, pady=(0, 10))
         ctk.CTkLabel(
             self.tab_grabar,
             text=(
@@ -141,38 +310,82 @@ class AsistenteClasesApp(ctk.CTk):
             ),
             text_color="#aaaaaa",
             anchor="w",
-        ).pack(fill="x", padx=18, pady=(0, 8))
+        ).pack(fill="x", padx=28, pady=(0, 12))
 
     def _tab_archivo_multimedia(self):
+        titulo_seccion(
+            self.tab_archivo,
+            "Importar una clase",
+            "Selecciona un audio o vídeo. El original no se modifica y ARGOS "
+            "conserva la transcripción dentro de tu repositorio.",
+        )
         self.materia_archivo, self.titulo_archivo = self._campos_clase(self.tab_archivo)
-        panel = ctk.CTkFrame(self.tab_archivo)
-        panel.pack(fill="x", padx=14, pady=(0, 10))
+        panel = tarjeta(self.tab_archivo)
+        panel.pack(fill="x", padx=24, pady=(0, 12))
         self.etiqueta_archivo = ctk.CTkLabel(panel, text="Ningún audio o vídeo seleccionado", anchor="w")
-        self.etiqueta_archivo.pack(side="left", fill="x", expand=True, padx=12, pady=12)
-        ctk.CTkButton(panel, text="Seleccionar audio o vídeo", command=self._seleccionar_archivo).pack(side="left", padx=6)
-        ctk.CTkButton(panel, text="Transcribir y guardar", command=self._transcribir_archivo).pack(side="left", padx=(0, 12))
+        self.etiqueta_archivo.pack(side="left", fill="x", expand=True, padx=16, pady=14)
+        ctk.CTkButton(
+            panel,
+            text="Seleccionar archivo",
+            command=self._seleccionar_archivo,
+            fg_color=COLOR_PANEL_SUAVE,
+            border_width=1,
+            border_color=COLOR_BORDE,
+        ).pack(side="left", padx=6)
+        ctk.CTkButton(
+            panel,
+            text="Transcribir y guardar",
+            command=self._transcribir_archivo,
+            fg_color=COLOR_ACENTO,
+        ).pack(side="left", padx=(0, 16))
         ctk.CTkLabel(
             self.tab_archivo,
             text="Admite vídeos largos. Solo usa su audio y no copia el vídeo original.",
             text_color="#aaaaaa", anchor="w"
-        ).pack(fill="x", padx=18, pady=(0, 8))
+        ).pack(fill="x", padx=28, pady=(0, 8))
         self.progreso_archivo = ctk.CTkProgressBar(self.tab_archivo)
-        self.progreso_archivo.pack(fill="x", padx=14, pady=(0, 10))
+        self.progreso_archivo.pack(fill="x", padx=24, pady=(0, 10))
         self.progreso_archivo.set(0)
-        self.texto_archivo = ctk.CTkTextbox(self.tab_archivo, font=ctk.CTkFont(size=13))
-        self.texto_archivo.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        self.texto_archivo = ctk.CTkTextbox(
+            self.tab_archivo,
+            font=ctk.CTkFont(size=14),
+            fg_color=COLOR_PANEL,
+            border_width=1,
+            border_color=COLOR_BORDE,
+        )
+        self.texto_archivo.pack(fill="both", expand=True, padx=24, pady=(0, 18))
 
     def _tab_biblioteca_clases(self):
-        superior = ctk.CTkFrame(self.tab_clases)
-        superior.pack(fill="x", padx=14, pady=14)
+        titulo_seccion(
+            self.tab_clases,
+            "Mis clases",
+            "Consulta el material generado sin salir de ARGOS.",
+        )
+        superior = tarjeta(self.tab_clases)
+        superior.pack(fill="x", padx=24, pady=(0, 12))
         self.buscar_clases = ctk.CTkEntry(superior, placeholder_text="Buscar por materia, título o fecha...")
-        self.buscar_clases.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=12)
-        ctk.CTkButton(superior, text="Buscar", command=self._refrescar_clases, width=90).pack(side="left", padx=6)
+        self.buscar_clases.pack(side="left", fill="x", expand=True, padx=(16, 6), pady=14)
+        self.buscar_clases.bind("<Return>", lambda _e: self._refrescar_clases())
         ctk.CTkButton(
-            superior, text="Abrir carpeta general", command=self.repositorio.abrir_raiz, width=150
-        ).pack(side="left", padx=(6, 12))
-        self.lista_clases = ctk.CTkScrollableFrame(self.tab_clases)
-        self.lista_clases.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+            superior,
+            text="Buscar",
+            command=self._refrescar_clases,
+            width=90,
+            fg_color=COLOR_ACENTO,
+        ).pack(side="left", padx=6)
+        ctk.CTkButton(
+            superior,
+            text="Abrir repositorio",
+            command=self.repositorio.abrir_raiz,
+            width=135,
+            fg_color=COLOR_PANEL_SUAVE,
+            border_width=1,
+            border_color=COLOR_BORDE,
+        ).pack(side="left", padx=(6, 16))
+        self.lista_clases = ctk.CTkScrollableFrame(
+            self.tab_clases, fg_color="transparent"
+        )
+        self.lista_clases.pack(fill="both", expand=True, padx=24, pady=(0, 18))
         self._refrescar_clases()
 
     def _refrescar_clases(self):
@@ -181,25 +394,190 @@ class AsistenteClasesApp(ctk.CTk):
         filtro = self.buscar_clases.get() if hasattr(self, "buscar_clases") else ""
         clases = self.repositorio.listar_clases(filtro)
         if not clases:
-            ctk.CTkLabel(self.lista_clases, text="Todavía no hay clases guardadas.").pack(pady=30)
+            ctk.CTkLabel(
+                self.lista_clases,
+                text="Todavía no hay clases guardadas.",
+                text_color=COLOR_TEXTO_SUAVE,
+            ).pack(pady=30)
+            self._refrescar_inicio()
             return
         for clase in clases:
-            fila = ctk.CTkFrame(self.lista_clases)
-            fila.pack(fill="x", pady=4)
-            fecha = clase.get("fecha_iso", "").replace("T", " ")[:16]
-            texto = f"{clase.get('numero', 0):03d} · {clase.get('materia', '')} · {clase.get('titulo', '')} · {fecha}"
-            ctk.CTkLabel(fila, text=texto, anchor="w").pack(side="left", fill="x", expand=True, padx=12, pady=10)
-            ctk.CTkButton(
-                fila, text="Abrir", width=80,
-                command=lambda r=clase["ruta"]: self.repositorio.abrir_carpeta(r)
-            ).pack(side="right", padx=10)
+            self._crear_tarjeta_clase(self.lista_clases, clase)
+        self._refrescar_inicio()
+
+    def _refrescar_inicio(self):
+        if not hasattr(self, "lista_inicio"):
+            return
+        for widget in self.lista_inicio.winfo_children():
+            widget.destroy()
+        clases = self.repositorio.listar_clases("")[:4]
+        if not clases:
+            ctk.CTkLabel(
+                self.lista_inicio,
+                text="Tus próximas clases aparecerán aquí.",
+                text_color=COLOR_TEXTO_SUAVE,
+            ).pack(anchor="w", pady=12)
+            return
+        for clase in clases:
+            self._crear_tarjeta_clase(
+                self.lista_inicio, clase, compacta=True
+            )
+
+    def _crear_tarjeta_clase(self, parent, clase, compacta: bool = False):
+        fila = tarjeta(parent, corner_radius=11)
+        fila.pack(fill="x", pady=4)
+        fecha = clase.get("fecha_iso", "").replace("T", " ")[:16]
+        bloque = ctk.CTkFrame(fila, fg_color="transparent")
+        bloque.pack(side="left", fill="x", expand=True, padx=14, pady=10)
+        ctk.CTkLabel(
+            bloque,
+            text=clase.get("titulo", "Clase sin título"),
+            text_color=COLOR_TEXTO,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            bloque,
+            text=(
+                f"{clase.get('materia', '')}  ·  Clase {clase.get('numero', 0):03d}"
+                + (f"  ·  {fecha}" if fecha else "")
+            ),
+            text_color=COLOR_TEXTO_SUAVE,
+            font=ctk.CTkFont(size=11),
+            anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+        ctk.CTkButton(
+            fila,
+            text="Ver clase",
+            width=88,
+            height=32,
+            fg_color=COLOR_ACENTO if not compacta else COLOR_PANEL_SUAVE,
+            command=lambda r=clase["ruta"]: self._abrir_clase_en_argos(r),
+        ).pack(side="right", padx=12)
+
+    def _tab_detalle_clase(self):
+        superior = ctk.CTkFrame(self.tab_detalle, fg_color="transparent")
+        superior.pack(fill="x", padx=24, pady=(20, 10))
+        ctk.CTkButton(
+            superior,
+            text="←  Mis clases",
+            width=105,
+            height=32,
+            fg_color="transparent",
+            border_width=1,
+            border_color=COLOR_BORDE,
+            command=lambda: self.tabs.set("Mis clases"),
+        ).pack(side="left")
+        self.btn_abrir_carpeta_detalle = ctk.CTkButton(
+            superior,
+            text="Abrir carpeta",
+            width=105,
+            height=32,
+            fg_color=COLOR_PANEL_SUAVE,
+        )
+        self.btn_abrir_carpeta_detalle.pack(side="right")
+        self.btn_reprocesar_detalle = ctk.CTkButton(
+            superior,
+            text="Actualizar material",
+            width=130,
+            height=32,
+            fg_color=COLOR_ACENTO,
+            command=self._reprocesar_clase_detalle,
+        )
+        self.btn_reprocesar_detalle.pack(side="right", padx=8)
+
+        self.titulo_detalle = ctk.CTkLabel(
+            self.tab_detalle,
+            text="Clase",
+            text_color=COLOR_TEXTO,
+            font=ctk.CTkFont(size=24, weight="bold"),
+            anchor="w",
+        )
+        self.titulo_detalle.pack(fill="x", padx=24)
+        self.meta_detalle = ctk.CTkLabel(
+            self.tab_detalle,
+            text="",
+            text_color=COLOR_TEXTO_SUAVE,
+            anchor="w",
+        )
+        self.meta_detalle.pack(fill="x", padx=24, pady=(3, 12))
+
+        self.selector_detalle = ctk.CTkSegmentedButton(
+            self.tab_detalle,
+            values=["Resumen", "Apuntes", "Transcripción", "Preguntas", "Tarjetas"],
+            command=self._mostrar_seccion_detalle,
+            selected_color=COLOR_ACENTO,
+            selected_hover_color=COLOR_ACENTO,
+        )
+        self.selector_detalle.pack(fill="x", padx=24, pady=(0, 10))
+        self.texto_detalle = ctk.CTkTextbox(
+            self.tab_detalle,
+            font=ctk.CTkFont(size=14),
+            fg_color=COLOR_PANEL,
+            border_width=1,
+            border_color=COLOR_BORDE,
+            wrap="word",
+        )
+        self.texto_detalle.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        self._ruta_detalle = None
+
+    def _abrir_clase_en_argos(self, ruta):
+        carpeta = Path(ruta)
+        self._ruta_detalle = carpeta
+        ficha = {}
+        try:
+            ficha = json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        self.titulo_detalle.configure(
+            text=ficha.get("titulo") or carpeta.name
+        )
+        fecha = str(ficha.get("fecha_iso", "")).replace("T", " ")[:16]
+        meta = f"{ficha.get('materia', '')}"
+        if ficha.get("numero"):
+            meta += f"  ·  Clase {int(ficha['numero']):03d}"
+        if fecha:
+            meta += f"  ·  {fecha}"
+        self.meta_detalle.configure(text=meta)
+        self.btn_abrir_carpeta_detalle.configure(
+            command=lambda r=carpeta: self.repositorio.abrir_carpeta(r)
+        )
+        self.selector_detalle.set("Resumen")
+        self._mostrar_seccion_detalle("Resumen")
+        self.tabs.set("Detalle de clase")
+
+    def _mostrar_seccion_detalle(self, seccion):
+        if not self._ruta_detalle:
+            return
+        _archivo, contenido = leer_material_clase(self._ruta_detalle, seccion)
+        self.texto_detalle.configure(state="normal")
+        self.texto_detalle.delete("1.0", "end")
+        self.texto_detalle.insert("end", contenido)
+        self.texto_detalle.configure(state="disabled")
+
+    def _reprocesar_clase_detalle(self):
+        if not self._ruta_detalle:
+            return
+        if hasattr(self, "_encolar_pipeline"):
+            self._encolar_pipeline(self._ruta_detalle, automatico=False)
+            self.tabs.set("Procesar clase")
+            return
+        messagebox.showinfo(
+            "ARGOS", "El procesamiento estará disponible al terminar de iniciar."
+        )
 
     def _tab_biblioteca_medica(self):
-        superior = ctk.CTkFrame(self.tab_medica)
-        superior.pack(fill="x", padx=14, pady=14)
+        titulo_seccion(
+            self.tab_medica,
+            "Biblioteca",
+            "Añade tratados, apuntes, exámenes y artículos para que ARGOS pueda "
+            "utilizarlos como fuentes locales.",
+        )
+        superior = tarjeta(self.tab_medica)
+        superior.pack(fill="x", padx=24, pady=(0, 12))
 
         self.buscar_documentos = ctk.CTkEntry(superior, placeholder_text="Buscar tratado, apunte, examen...")
-        self.buscar_documentos.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=12)
+        self.buscar_documentos.pack(side="left", fill="x", expand=True, padx=(16, 6), pady=14)
         self.categoria_documentos = ctk.CTkComboBox(superior, values=["Todas", *CATEGORIAS], width=130)
         self.categoria_documentos.set("Todas")
         self.categoria_documentos.pack(side="left", padx=6)
@@ -207,10 +585,10 @@ class AsistenteClasesApp(ctk.CTk):
         ctk.CTkButton(superior, text="Importar", command=self._importar_documentos, width=90).pack(side="left", padx=6)
         ctk.CTkButton(
             superior, text="Abrir carpeta", command=self.biblioteca_medica.abrir_raiz, width=110
-        ).pack(side="left", padx=(6, 12))
+        ).pack(side="left", padx=(6, 16))
 
         acciones = ctk.CTkFrame(self.tab_medica, fg_color="transparent")
-        acciones.pack(fill="x", padx=14, pady=(0, 8))
+        acciones.pack(fill="x", padx=24, pady=(0, 8))
         ctk.CTkButton(
             acciones, text="Extraer texto pendiente", command=self._procesar_documentos_pendientes
         ).pack(side="left")
@@ -224,10 +602,12 @@ class AsistenteClasesApp(ctk.CTk):
             self.tab_medica,
             text="Los PDFs digitales se indexan por página. Los escaneados se marcarán como «requiere OCR».",
             text_color="#aaaaaa", anchor="w"
-        ).pack(fill="x", padx=18, pady=(0, 8))
+        ).pack(fill="x", padx=28, pady=(0, 8))
 
-        self.lista_documentos = ctk.CTkScrollableFrame(self.tab_medica)
-        self.lista_documentos.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        self.lista_documentos = ctk.CTkScrollableFrame(
+            self.tab_medica, fg_color="transparent"
+        )
+        self.lista_documentos.pack(fill="both", expand=True, padx=24, pady=(0, 18))
         self._refrescar_documentos()
 
     def _refrescar_documentos(self):
@@ -331,8 +711,15 @@ class AsistenteClasesApp(ctk.CTk):
         self.progreso_documentos.set(valor)
 
     def _tab_configuracion(self):
-        marco = ctk.CTkScrollableFrame(self.tab_config)
-        marco.pack(fill="both", expand=True, padx=14, pady=14)
+        titulo_seccion(
+            self.tab_config,
+            "Configuración",
+            "Ajustes del motor local de transcripción.",
+        )
+        marco = ctk.CTkScrollableFrame(
+            self.tab_config, fg_color=COLOR_PANEL
+        )
+        marco.pack(fill="both", expand=True, padx=24, pady=(0, 20))
         ctk.CTkLabel(
             marco,
             text=(
@@ -465,6 +852,9 @@ class AsistenteClasesApp(ctk.CTk):
         )
         self.btn_grabar.configure(state="disabled")
         self.btn_detener.configure(state="normal")
+        self.estado_grabacion_global.configure(
+            text="●  Grabando", text_color=COLOR_PELIGRO
+        )
         self.estado.configure(
             text=f"Grabando con {dispositivo.nombre}; audio protegido en {carpeta.name}."
         )
@@ -535,6 +925,9 @@ class AsistenteClasesApp(ctk.CTk):
             self.repositorio.marcar_estado_grabacion(carpeta, "deteniendo")
         self.btn_detener.configure(state="disabled")
         self.btn_detener.configure(text="Guardando texto pendiente…")
+        self.estado_grabacion_global.configure(
+            text="●  Guardando", text_color=COLOR_ALERTA
+        )
         self.estado.configure(
             text="Deteniendo el micrófono; terminando únicamente los fragmentos pendientes…"
         )
@@ -619,6 +1012,10 @@ class AsistenteClasesApp(ctk.CTk):
     def _restablecer_controles_grabacion(self):
         self.btn_grabar.configure(state="normal")
         self.btn_detener.configure(state="disabled", text="Detener y guardar")
+        self.estado_grabacion_global.configure(
+            text="●  Sin grabación", text_color=COLOR_TEXTO_SUAVE
+        )
+        self.reloj.configure(text="00:00:00")
         self.nivel.set(0)
         if hasattr(self, "etiqueta_nivel"):
             self.etiqueta_nivel.configure(text="Señal: 0 %")

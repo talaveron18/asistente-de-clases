@@ -11,6 +11,16 @@ import customtkinter as ctk
 from bloqueos import BloqueoArchivo, BloqueoOcupadoError
 from chat_argos import ChatArgos
 from indice_sqlite import IndiceConocimientoSQLite
+from interfaz_argos import (
+    COLOR_ACENTO,
+    COLOR_BORDE,
+    COLOR_PANEL,
+    COLOR_PANEL_SUAVE,
+    COLOR_TEXTO,
+    COLOR_TEXTO_SUAVE,
+    tarjeta,
+    titulo_seccion,
+)
 from main import AsistenteClasesApp
 from orquestador import ClaseEnProcesoError, OrquestadorArgos
 
@@ -160,8 +170,8 @@ class ArgosApp(AsistenteClasesApp):
 
     def _inicio_indice_ui(self):
         self.btn_reprocesar.configure(state="disabled")
-        self.estado_chat.configure(text="Reconstruyendo índice FTS5...")
-        self.estado.configure(text="ARGOS está actualizando el índice...")
+        self.estado_chat.configure(text="Actualizando la memoria local…")
+        self.estado.configure(text="ARGOS está actualizando su memoria…")
 
     def _actualizar_progreso_indice(self, mensaje: str, progreso: float):
         porcentaje = round(max(0.0, min(1.0, progreso)) * 100)
@@ -170,10 +180,10 @@ class ArgosApp(AsistenteClasesApp):
 
     def _indice_completado(self, stats: dict):
         self._actualizar_estado_indice()
-        self.estado.configure(text="Índice FTS5 actualizado.")
+        self.estado.configure(text="Memoria local actualizada.")
         messagebox.showinfo(
-            "Índice ARGOS",
-            f"Índice listo: {stats['bloques']} bloques.",
+            "Memoria de ARGOS",
+            f"Memoria lista: {stats['bloques']} fragmentos consultables.",
         )
 
     def _indice_error(self, error: str):
@@ -233,31 +243,21 @@ class ArgosApp(AsistenteClasesApp):
             "ARGOS",
             "La transcripción está guardada, pero el procesamiento falló.\n\n"
             f"Clase: {ruta}\n\nError: {error}\n\n"
-            "Consulta estado_argos.json dentro de la carpeta.",
+            "Puedes volver a intentarlo desde «Estado y procesos».",
         )
 
     def _crear_tab_pipeline(self):
-        panel = ctk.CTkFrame(self.tab_pipeline)
-        panel.pack(fill="x", padx=14, pady=14)
-        ctk.CTkLabel(
-            panel,
-            text="Pipeline único de clase",
-            font=ctk.CTkFont(size=19, weight="bold"),
-        ).pack(anchor="w", padx=14, pady=(14, 4))
-        ctk.CTkLabel(
-            panel,
-            text=(
-                "Corrección médica → análisis → material de estudio → índice FTS5 "
-                "→ referencias. Las clases se procesan en una sola cola."
-            ),
-            text_color="#aaaaaa",
-            anchor="w",
-            justify="left",
-            wraplength=930,
-        ).pack(fill="x", padx=14, pady=(0, 12))
+        titulo_seccion(
+            self.tab_pipeline,
+            "Estado y procesos",
+            "ARGOS corrige, organiza y relaciona cada clase con tu biblioteca. "
+            "Los trabajos se ejecutan de uno en uno para mantener tus archivos seguros.",
+        )
+        panel = tarjeta(self.tab_pipeline)
+        panel.pack(fill="x", padx=24, pady=(0, 12))
 
         fila = ctk.CTkFrame(panel, fg_color="transparent")
-        fila.pack(fill="x", padx=14, pady=(0, 14))
+        fila.pack(fill="x", padx=16, pady=16)
         self.selector_pipeline = ctk.CTkComboBox(
             fila, values=["Sin clases guardadas"], width=650
         )
@@ -267,26 +267,34 @@ class ArgosApp(AsistenteClasesApp):
             text="Actualizar",
             command=self._actualizar_selector_pipeline,
             width=90,
+            fg_color=COLOR_PANEL_SUAVE,
+            border_width=1,
+            border_color=COLOR_BORDE,
         ).pack(side="left", padx=6)
         self.btn_reprocesar = ctk.CTkButton(
             fila,
             text="Reprocesar clase",
             command=self._reprocesar_clase,
             width=130,
+            fg_color=COLOR_ACENTO,
         )
         self.btn_reprocesar.pack(side="left")
 
         self.estado_pipeline = ctk.CTkLabel(
             self.tab_pipeline, text="Selecciona una clase.", anchor="w"
         )
-        self.estado_pipeline.pack(fill="x", padx=18, pady=(0, 6))
+        self.estado_pipeline.pack(fill="x", padx=28, pady=(0, 6))
         self.progreso_pipeline = ctk.CTkProgressBar(self.tab_pipeline)
-        self.progreso_pipeline.pack(fill="x", padx=14, pady=(0, 10))
+        self.progreso_pipeline.pack(fill="x", padx=24, pady=(0, 10))
         self.progreso_pipeline.set(0)
         self.salida_pipeline = ctk.CTkTextbox(
-            self.tab_pipeline, font=ctk.CTkFont(size=13)
+            self.tab_pipeline,
+            font=ctk.CTkFont(size=13),
+            fg_color=COLOR_PANEL,
+            border_width=1,
+            border_color=COLOR_BORDE,
         )
-        self.salida_pipeline.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        self.salida_pipeline.pack(fill="both", expand=True, padx=24, pady=(0, 20))
 
     def _actualizar_selector_pipeline(self):
         self._clases_pipeline = self.repositorio.listar_clases("")
@@ -332,14 +340,61 @@ class ArgosApp(AsistenteClasesApp):
             f"Referencias locales: {resultado.get('referencias', 0)}",
             f"Bloques indexados: {indice.get('bloques', 0)}",
             "",
-            "El detalle de cada etapa está en estado_argos.json.",
+            "El material de estudio está disponible en la ficha de la clase.",
         ]
         self.salida_pipeline.delete("1.0", "end")
         self.salida_pipeline.insert("end", "\n".join(lineas))
 
     def _crear_tab_chat(self):
-        superior = ctk.CTkFrame(self.tab_chat)
-        superior.pack(fill="x", padx=14, pady=14)
+        titulo_seccion(
+            self.tab_chat,
+            "Preguntar a ARGOS",
+            "Consulta tus clases y documentos. Cada respuesta mantiene visibles "
+            "las fuentes utilizadas.",
+        )
+        cuerpo = ctk.CTkFrame(self.tab_chat, fg_color="transparent")
+        cuerpo.pack(fill="both", expand=True, padx=24, pady=(0, 10))
+        cuerpo.grid_rowconfigure(0, weight=1)
+        cuerpo.grid_columnconfigure(0, weight=3)
+        cuerpo.grid_columnconfigure(1, weight=1)
+
+        conversacion = tarjeta(cuerpo)
+        conversacion.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        conversacion.grid_rowconfigure(0, weight=1)
+        conversacion.grid_columnconfigure(0, weight=1)
+        self.respuesta_chat = ctk.CTkTextbox(
+            conversacion,
+            font=ctk.CTkFont(size=14),
+            fg_color=COLOR_PANEL,
+            border_width=0,
+            wrap="word",
+        )
+        self.respuesta_chat.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+
+        fuentes = tarjeta(cuerpo)
+        fuentes.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        ctk.CTkLabel(
+            fuentes,
+            text="Fuentes",
+            text_color=COLOR_TEXTO,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(14, 6))
+        self.fuentes_chat = ctk.CTkScrollableFrame(
+            fuentes, fg_color="transparent"
+        )
+        self.fuentes_chat.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self.estado_chat = ctk.CTkLabel(
+            self.tab_chat,
+            text="Preparando la memoria local…",
+            anchor="w",
+            text_color=COLOR_TEXTO_SUAVE,
+        )
+        self.estado_chat.pack(fill="x", padx=28, pady=(0, 6))
+
+        superior = tarjeta(self.tab_chat)
+        superior.pack(fill="x", padx=24, pady=(0, 20))
         self.pregunta_argos = ctk.CTkEntry(
             superior,
             placeholder_text="Pregunta a tus clases, apuntes y tratados...",
@@ -366,37 +421,27 @@ class ArgosApp(AsistenteClasesApp):
         self.alcance_chat.pack(side="left", padx=6)
         ctk.CTkButton(
             superior,
-            text="Preguntar",
+            text="Enviar",
             command=self._preguntar_argos,
             width=95,
+            fg_color=COLOR_ACENTO,
         ).pack(side="left", padx=6)
         ctk.CTkButton(
             superior,
-            text="Actualizar índice",
+            text="Actualizar memoria",
             command=self._reconstruir_indice,
-            width=125,
+            width=135,
+            fg_color=COLOR_PANEL_SUAVE,
+            border_width=1,
+            border_color=COLOR_BORDE,
         ).pack(side="left", padx=(0, 12))
-
-        self.estado_chat = ctk.CTkLabel(
-            self.tab_chat,
-            text="Índice sin comprobar.",
-            anchor="w",
-            text_color="#aaaaaa",
-        )
-        self.estado_chat.pack(fill="x", padx=18, pady=(0, 8))
-        self.respuesta_chat = ctk.CTkTextbox(
-            self.tab_chat, font=ctk.CTkFont(size=13)
-        )
-        self.respuesta_chat.pack(fill="both", expand=True, padx=14, pady=(0, 8))
-        self.fuentes_chat = ctk.CTkScrollableFrame(self.tab_chat, height=175)
-        self.fuentes_chat.pack(fill="x", padx=14, pady=(0, 14))
 
     def _actualizar_estado_indice(self):
         try:
             stats = self.indice_fts.estadisticas()
             self.estado_chat.configure(
                 text=(
-                    f"Índice FTS5: {stats['bloques']} bloques · "
+                    f"Memoria local: {stats['bloques']} fragmentos · "
                     f"{stats['clases']} de clases · "
                     f"{stats['documentos']} documentales"
                 )
@@ -426,7 +471,7 @@ class ArgosApp(AsistenteClasesApp):
         self.respuesta_chat.delete("1.0", "end")
         for widget in self.fuentes_chat.winfo_children():
             widget.destroy()
-        self.estado_chat.configure(text="Consultando el único índice FTS5...")
+        self.estado_chat.configure(text="Consultando tu memoria local…")
 
         def worker():
             try:
