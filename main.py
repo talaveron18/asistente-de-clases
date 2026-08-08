@@ -722,7 +722,271 @@ class AsistenteClasesApp(ctk.CTk):
         ).pack(side="left", padx=(6, 16))
 
         acciones = ctk.CTkFrame(self.tab_medica, fg_color="transparent")
-        acciones.pack(fill="x", padx=24, pady=(0, 8))��h��춻�q�^upt Exception as exc:
+        acciones.pack(fill="x", padx=24, pady=(0, 8))
+        ctk.CTkButton(
+            acciones, text="Extraer texto pendiente", command=self._procesar_documentos_pendientes
+        ).pack(side="left")
+        self.progreso_documentos = ctk.CTkProgressBar(acciones)
+        self.progreso_documentos.pack(side="left", fill="x", expand=True, padx=12)
+        self.progreso_documentos.set(0)
+        self.estado_documentos = ctk.CTkLabel(acciones, text="Sin documentos procesándose", width=230, anchor="e")
+        self.estado_documentos.pack(side="right")
+
+        ctk.CTkLabel(
+            self.tab_medica,
+            text="Los PDFs digitales se indexan por página. Los escaneados se marcarán como «requiere OCR».",
+            text_color="#aaaaaa", anchor="w"
+        ).pack(fill="x", padx=28, pady=(0, 8))
+
+        self.lista_documentos = ctk.CTkScrollableFrame(
+            self.tab_medica, fg_color="transparent"
+        )
+        self.lista_documentos.pack(fill="both", expand=True, padx=24, pady=(0, 18))
+        self._refrescar_documentos()
+
+    def _refrescar_documentos(self):
+        for widget in self.lista_documentos.winfo_children():
+            widget.destroy()
+        filtro = self.buscar_documentos.get() if hasattr(self, "buscar_documentos") else ""
+        categoria = self.categoria_documentos.get() if hasattr(self, "categoria_documentos") else "Todas"
+        items = self.biblioteca_medica.listar(filtro, categoria)
+        if not items:
+            ctk.CTkLabel(self.lista_documentos, text="Todavía no hay documentos médicos importados.").pack(pady=30)
+            return
+
+        nombres_estado = {
+            "pendiente": "Pendiente",
+            "procesando": "Procesando",
+            "texto_extraido": "Texto extraído",
+            "requiere_ocr": "Requiere OCR",
+            "error": "Error",
+        }
+        for item in items:
+            fila = ctk.CTkFrame(self.lista_documentos)
+            fila.pack(fill="x", pady=4)
+            estado = nombres_estado.get(item.get("estado_indice_ia"), item.get("estado_indice_ia", ""))
+            paginas = item.get("total_paginas")
+            detalle = f"{item.get('categoria')} · {estado}"
+            if paginas:
+                detalle += f" · {paginas} pág."
+            bloque = ctk.CTkFrame(fila, fg_color="transparent")
+            bloque.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+            ctk.CTkLabel(bloque, text=item.get("nombre", ""), anchor="w", font=ctk.CTkFont(weight="bold")).pack(fill="x")
+            ctk.CTkLabel(bloque, text=detalle, anchor="w", text_color="#aaaaaa").pack(fill="x")
+            ctk.CTkButton(
+                fila, text="Abrir", width=70,
+                command=lambda r=item["ruta"]: self.biblioteca_medica.abrir_archivo(r)
+            ).pack(side="right", padx=(4, 10))
+            if item.get("estado_indice_ia") in {"pendiente", "error"}:
+                ctk.CTkButton(
+                    fila, text="Extraer", width=75,
+                    command=lambda i=item["id"]: self._procesar_un_documento(i)
+                ).pack(side="right", padx=4)
+
+    def _importar_documentos(self):
+        categoria = self.categoria_documentos.get()
+        if categoria == "Todas":
+            categoria = "Tratados"
+        rutas = filedialog.askopenfilenames(
+            title="Importar documentos médicos",
+            filetypes=[
+                ("Documentos", "*.pdf *.docx *.txt *.md"),
+                ("PDF", "*.pdf"),
+                ("Word", "*.docx"),
+                ("Todos", "*.*"),
+            ],
+        )
+        if not rutas:
+            return
+        self._importar_y_procesar_documentos(rutas, categoria)
+
+    def _importar_y_procesar_documentos(self, rutas, categoria="Tratados"):
+        nuevos, repetidos, errores, ids_nuevos = 0, 0, [], []
+        for ruta in rutas:
+            try:
+                item, creado = self.biblioteca_medica.importar_archivo(
+                    ruta, categoria
+                )
+                nuevos += int(creado)
+                repetidos += int(not creado)
+                if creado or item.get("estado_indice_ia") in {
+                    "pendiente",
+                    "error",
+                    "procesando",
+                }:
+                    ids_nuevos.append(item["id"])
+            except Exception as exc:
+                errores.append(f"{Path(ruta).name}: {exc}")
+        self._refrescar_documentos()
+        mensaje = f"Importados: {nuevos}. Ya existentes: {repetidos}."
+        if errores:
+            mensaje += "\n\nErrores:\n" + "\n".join(errores[:5])
+        if not ids_nuevos:
+            messagebox.showinfo("Biblioteca médica", mensaje)
+            return
+        self.estado_documentos.configure(
+            text=f"Extrayendo texto de {len(ids_nuevos)} documento(s)…"
+        )
+
+        def worker():
+            errores_extraccion = []
+            total = len(ids_nuevos)
+            for posicion, item_id in enumerate(ids_nuevos, 1):
+                try:
+                    self.biblioteca_medica.procesar_documento(
+                        item_id,
+                        lambda msg, p, pos=posicion: self.after(
+                            0,
+                            self._actualizar_progreso_documentos,
+                            msg,
+                            ((pos - 1) + p) / total,
+                        ),
+                    )
+                except Exception as exc:
+                    errores_extraccion.append(str(exc))
+            self.after(0, self._refrescar_documentos)
+            self.after(
+                0,
+                self._fin_importacion_documentos,
+                mensaje,
+                errores_extraccion,
+            )
+
+        threading.Thread(
+            target=worker, daemon=True, name="argos-importacion-documentos"
+        ).start()
+
+    def _fin_importacion_documentos(self, mensaje, errores):
+        self._actualizar_progreso_documentos("Finalizado", 0)
+        if errores:
+            mensaje += "\n\nErrores de extracción:\n" + "\n".join(errores[:5])
+        messagebox.showinfo("Biblioteca médica", mensaje)
+        if not errores and hasattr(self, "_reconstruir_indice"):
+            self._reconstruir_indice()
+
+    def _procesar_un_documento(self, item_id):
+        def worker():
+            try:
+                self.biblioteca_medica.procesar_documento(
+                    item_id,
+                    lambda msg, p: self.after(0, self._actualizar_progreso_documentos, msg, p)
+                )
+                self.after(0, self._refrescar_documentos)
+            except Exception as exc:
+                self.after(0, messagebox.showerror, "Extracción documental", str(exc))
+            finally:
+                self.after(0, self._actualizar_progreso_documentos, "Finalizado", 0)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _procesar_documentos_pendientes(self):
+        def worker():
+            try:
+                self.biblioteca_medica.procesar_pendientes(
+                    lambda msg, p: self.after(0, self._actualizar_progreso_documentos, msg, p)
+                )
+                self.after(0, self._refrescar_documentos)
+                self.after(0, messagebox.showinfo, "Biblioteca médica", "Extracción de texto completada.")
+            except Exception as exc:
+                self.after(0, messagebox.showerror, "Extracción documental", str(exc))
+            finally:
+                self.after(0, self._actualizar_progreso_documentos, "Finalizado", 0)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _actualizar_progreso_documentos(self, mensaje, valor):
+        self.estado_documentos.configure(text=mensaje)
+        self.progreso_documentos.set(valor)
+
+    def _tab_configuracion(self):
+        titulo_seccion(
+            self.tab_config,
+            "Configuración",
+            "Ajustes del motor local de transcripción.",
+        )
+        marco = ctk.CTkScrollableFrame(
+            self.tab_config, fg_color=COLOR_PANEL
+        )
+        marco.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        ctk.CTkLabel(
+            marco,
+            text=(
+                "Token de Hugging Face (solo desarrollo; la diarización no "
+                "está incluida en el instalador básico)"
+            ),
+            anchor="w",
+        ).pack(fill="x", pady=(8, 4))
+        self.token = ctk.CTkEntry(marco, show="*")
+        self.token.pack(fill="x", pady=(0, 12))
+        self.token.insert(0, self.config_obj.hf_token)
+        ctk.CTkLabel(marco, text="Modelo Whisper", anchor="w").pack(fill="x")
+        self.modelo = ctk.CTkComboBox(marco, values=["tiny", "base", "small", "medium", "large-v3"])
+        self.modelo.pack(fill="x", pady=(4, 12))
+        self.modelo.set(self.config_obj.whisper_model)
+        ctk.CTkLabel(marco, text="Idioma", anchor="w").pack(fill="x")
+        self.idioma = ctk.CTkComboBox(marco, values=["es", "en", "fr", "de", "it", "pt", "auto"])
+        self.idioma.pack(fill="x", pady=(4, 12))
+        self.idioma.set(self.config_obj.idioma)
+        self.gpu = ctk.CTkSwitch(marco, text="Usar GPU NVIDIA cuando esté disponible")
+        self.gpu.pack(fill="x", pady=8)
+        if self.config_obj.usar_gpu:
+            self.gpu.select()
+        ctk.CTkButton(marco, text="Guardar y recargar modelos", command=self._guardar_config).pack(pady=18)
+
+    def _datos_clase(self, materia, titulo):
+        m, t = materia.get().strip(), titulo.get().strip()
+        if not m or not t:
+            messagebox.showwarning("Datos de la clase", "Indica la materia y el título antes de continuar.")
+            return None
+        return m, t
+
+    def _detectar_hardware_audio(self, mostrar_error: bool = False):
+        try:
+            dispositivos = GrabadorAudio.detectar_dispositivos_entrada(
+                self.config_obj.sample_rate,
+                self.config_obj.dispositivo_audio,
+            )
+            dispositivo = dispositivos[0]
+            self._dispositivos_entrada = dispositivos
+            self._dispositivo_entrada = dispositivo
+            if hasattr(self, "etiqueta_micro"):
+                self.etiqueta_micro.configure(
+                    text=(
+                        f"{dispositivo.nombre} · {dispositivo.sample_rate} Hz "
+                        f"· {dispositivo.canales} canal(es) · selección automática"
+                    ),
+                    text_color="#4caf50",
+                )
+            return dispositivo
+        except Exception as exc:
+            self._dispositivos_entrada = []
+            self._dispositivo_entrada = None
+            if hasattr(self, "etiqueta_micro"):
+                self.etiqueta_micro.configure(
+                    text="No se encontró una entrada de audio utilizable",
+                    text_color="#ef5350",
+                )
+            if mostrar_error:
+                messagebox.showerror("Hardware de audio", str(exc))
+            return None
+
+    def _iniciar_grabacion(self):
+        datos = self._datos_clase(self.materia_grabar, self.titulo_grabar)
+        if not datos:
+            return
+        if not self.transcriptor or not self.transcriptor.modelos_cargados:
+            messagebox.showwarning("Modelos", "Los modelos todavía no están listos.")
+            return
+        dispositivo = self._detectar_hardware_audio(mostrar_error=True)
+        if not dispositivo:
+            return
+        materia, titulo = datos
+        try:
+            carpeta = self.repositorio.iniciar_grabacion(
+                materia,
+                titulo,
+                dispositivo.sample_rate,
+                f"{dispositivo.indice}: {dispositivo.nombre}",
+            )
+        except Exception as exc:
             messagebox.showerror("Grabación", f"No se pudo preparar la clase: {exc}")
             return
 
