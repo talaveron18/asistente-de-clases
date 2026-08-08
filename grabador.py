@@ -14,6 +14,11 @@ from typing import Callable, Optional
 import numpy as np
 
 
+# El valor mostrado en interfaz multiplica el RMS por cinco. Un 1 % evita que
+# el ruido eléctrico de una ruta muda se confunda con voz y bloquee el failover.
+UMBRAL_SENAL_UTIL = 0.01
+
+
 def _sounddevice():
     """Carga PortAudio solo cuando se consulta o utiliza el micrófono."""
     import sounddevice
@@ -129,7 +134,12 @@ class GrabadorAudio:
         self._indice_candidato = 0
         self._dispositivo_activo: DispositivoEntrada | None = None
         self._callback_dispositivo = None
+        self._sd = None
+        self._callback_nivel = None
+        self._cambio_entrada_lock = threading.Lock()
+        self.pruebas_senal: list[dict[str, object]] = []
         self._nivel_maximo_dispositivo = 0.0
+        self._bloques_con_senal_dispositivo = 0
         self._inicio_dispositivo = 0.0
         self._canal_activo = 0
         self._wav = None
@@ -232,7 +242,10 @@ class GrabadorAudio:
             nombre = str(datos.get("name", f"Entrada {indice}"))
             puntuacion = 0
             if indice == predeterminado:
-                puntuacion += 1000
+                # El predeterminado global de PortAudio pertenece al host API
+                # predeterminado (MME en el binario estándar de Windows). No
+                # debe imponerse sobre la misma entrada expuesta por WASAPI.
+                puntuacion += 400
             if indice in predeterminados_host:
                 puntuacion += 500
             if indice == previo:
@@ -250,16 +263,25 @@ class GrabadorAudio:
             hostapi = nombres_host.get(indice_host, "")
             host_normalizado = hostapi.casefold()
             if "wasapi" in host_normalizado:
-                puntuacion += 180
+                puntuacion += 1200
             elif "wdm" in host_normalizado:
-                puntuacion += 120
+                puntuacion += 300
             elif "directsound" in host_normalizado:
-                puntuacion += 60
+                puntuacion += 300
+            elif "mme" in host_normalizado:
+                puntuacion -= 400
 
-            rates = [sample_rate_preferido]
+            # En Windows conviene abrir primero el dispositivo a su frecuencia
+            # nativa. Algunos controladores (especialmente Realtek) aceptan
+            # 16 kHz en ``check_input_settings`` pero entregan silencio al
+            # iniciar el stream. ARGOS remuestrea después a la frecuencia del
+            # WAV, por lo que no necesita forzar al hardware.
             rate_nativo = int(float(datos.get("default_samplerate", 0) or 0))
-            if rate_nativo > 0 and rate_nativo not in rates:
+            rates = []
+            if rate_nativo > 0:
                 rates.append(rate_nativo)
+            if sample_rate_preferido not in rates:
+                rates.append(sample_rate_preferido)
             for rate in rates:
                 max_canales = max(1, int(datos.get("max_input_channels", 1)))
                 canales_a_probar = []
@@ -297,14 +319,94 @@ class GrabadorAudio:
             )
         candidatos.sort(key=lambda item: item[0], reverse=True)
         ordenados = [item[1] for item in candidatos]
-        frecuencia_principal = ordenados[0].sample_rate
-        # El WAV debe mantener una sola frecuencia. Las rutas incompatibles
-        # siguen siendo detectables, pero no pueden sustituirse a mitad de WAV.
-        return [
-            candidato
-            for candidato in ordenados
-            if candidato.sample_rate == frecuencia_principal
-        ][:6]
+        # Las rutas pueden tener frecuencias nativas distintas. El capturador
+        # las normaliza a la frecuencia única del WAV, así que deben conservarse
+        # para que el failover sea real y no solo entre duplicados equivalentes.
+        return ordenados[:12]
+
+    @staticmethod
+    def medir_senal(
+        entrada: DispositivoEntrada,
+        duracion: float = 0.35,
+        sd=None,
+    ) -> float:
+        """Abre brevemente una ruta y devuelve su nivel máximo real.
+
+        ``check_input_settings`` solo valida el formato. Esta prueba confirma
+        que PortAudio entrega muestras, sin guardar el audio ni retrasar la
+        apertura de la ventana principal.
+        """
+        sd = sd or _sounddevice()
+        nivel_maximo = 0.0
+        hay_senal = threading.Event()
+
+        def callback(indata, frames, time_info, status):
+            nonlocal nivel_maximo
+            del frames, time_info, status
+            _, _, rms = GrabadorAudio._canal_con_mas_senal(indata)
+            nivel = min(rms / 32768.0 * 5.0, 1.0)
+            nivel_maximo = max(nivel_maximo, nivel)
+            if nivel >= UMBRAL_SENAL_UTIL:
+                hay_senal.set()
+
+        stream = sd.InputStream(
+            samplerate=entrada.sample_rate,
+            channels=entrada.canales,
+            dtype="int16",
+            device=entrada.indice,
+            blocksize=max(256, int(entrada.sample_rate * 0.1)),
+            callback=callback,
+        )
+        try:
+            stream.start()
+            hay_senal.wait(timeout=max(0.05, duracion))
+        finally:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
+        return nivel_maximo
+
+    def _priorizar_entrada_con_senal(self, sd) -> None:
+        """Prueba las mejores rutas y adelanta la primera con señal útil.
+
+        La comprobación se limita a cuatro candidatos. Si el usuario aún no
+        habla o Windows bloquea todos, se conserva la prioridad WASAPI y el
+        supervisor seguirá probando el resto durante la grabación.
+        """
+        self.pruebas_senal = []
+        if len(self._candidatos_entrada) < 2:
+            return
+        primera_ruta_abierta = None
+        for posicion, entrada in enumerate(self._candidatos_entrada[:4]):
+            resultado: dict[str, object] = {
+                "indice": entrada.indice,
+                "nombre": entrada.nombre,
+                "hostapi": entrada.hostapi,
+                "frecuencia": entrada.sample_rate,
+            }
+            try:
+                nivel = self.medir_senal(entrada, sd=sd)
+                resultado["nivel"] = nivel
+                if primera_ruta_abierta is None:
+                    primera_ruta_abierta = posicion
+            except Exception as exc:
+                nivel = 0.0
+                resultado["error"] = str(exc)
+            self.pruebas_senal.append(resultado)
+            if nivel >= UMBRAL_SENAL_UTIL:
+                if posicion:
+                    self._candidatos_entrada.insert(
+                        0, self._candidatos_entrada.pop(posicion)
+                    )
+                self.dispositivo = entrada.indice
+                return
+        # Si la ruta mejor puntuada ni siquiera pudo abrirse, no repetimos el
+        # mismo fallo al iniciar la grabación: usamos la primera que sí abrió.
+        if primera_ruta_abierta:
+            entrada = self._candidatos_entrada.pop(primera_ruta_abierta)
+            self._candidatos_entrada.insert(0, entrada)
+            self.dispositivo = entrada.indice
 
     def iniciar(
         self,
@@ -357,13 +459,6 @@ class GrabadorAudio:
                     self.sample_rate,
                 )
             ]
-        compatibles = [
-            entrada
-            for entrada in self._candidatos_entrada
-            if entrada.sample_rate == self.sample_rate
-        ]
-        if compatibles:
-            self._candidatos_entrada = compatibles
         indice_inicial = next(
             (
                 i
@@ -387,6 +482,10 @@ class GrabadorAudio:
 
         try:
             sd = _sounddevice()
+            self._sd = sd
+            self._callback_nivel = callback_nivel
+            self._priorizar_entrada_con_senal(sd)
+            self._indice_candidato = 0
             self._wav = wave.open(self._archivo_salida, "wb")
             self._wav.setnchannels(1)
             self._wav.setsampwidth(2)
@@ -454,6 +553,36 @@ class GrabadorAudio:
         nivel = float(energias[canal]) if energias.size else 0.0
         return mono, canal, nivel
 
+    @staticmethod
+    def _remuestrear_mono(
+        muestras: np.ndarray, frecuencia_origen: int, frecuencia_destino: int
+    ) -> np.ndarray:
+        """Normaliza un bloque mono sin exigir una frecuencia al controlador.
+
+        La interpolación lineal es suficiente para voz y evita añadir otra
+        dependencia pesada al instalador. El tamaño de bloque de 100 ms hace
+        que el coste y el error temporal sean despreciables para transcripción.
+        """
+        muestras = np.asarray(muestras, dtype=np.int16)
+        if (
+            frecuencia_origen == frecuencia_destino
+            or muestras.size == 0
+            or frecuencia_origen <= 0
+            or frecuencia_destino <= 0
+        ):
+            return np.ascontiguousarray(muestras, dtype=np.int16)
+        cantidad = max(
+            1, int(round(muestras.size * frecuencia_destino / frecuencia_origen))
+        )
+        posiciones_origen = np.arange(muestras.size, dtype=np.float64)
+        posiciones_destino = np.linspace(
+            0, muestras.size - 1, cantidad, dtype=np.float64
+        )
+        remuestreadas = np.interp(
+            posiciones_destino, posiciones_origen, muestras.astype(np.float64)
+        )
+        return np.ascontiguousarray(np.rint(remuestreadas), dtype=np.int16)
+
     def _abrir_stream(self, sd, entrada, callback_nivel) -> None:
         with self._stream_lock:
             self._generacion_stream += 1
@@ -461,6 +590,7 @@ class GrabadorAudio:
             self._dispositivo_activo = entrada
             self.dispositivo = entrada.indice
             self._nivel_maximo_dispositivo = 0.0
+            self._bloques_con_senal_dispositivo = 0
             self._inicio_dispositivo = time.monotonic()
 
             def callback(indata, frames, time_info, status):
@@ -469,6 +599,9 @@ class GrabadorAudio:
                 if not self.is_recording or generacion != self._generacion_stream:
                     return
                 mono, canal, rms = self._canal_con_mas_senal(indata)
+                mono = self._remuestrear_mono(
+                    mono, entrada.sample_rate, self.sample_rate
+                )
                 self._canal_activo = canal
                 datos = mono.tobytes()
                 with self._lock:
@@ -481,6 +614,8 @@ class GrabadorAudio:
                 self._nivel_maximo_dispositivo = max(
                     self._nivel_maximo_dispositivo, nivel
                 )
+                if nivel >= UMBRAL_SENAL_UTIL:
+                    self._bloques_con_senal_dispositivo += 1
                 if callback_nivel:
                     try:
                         callback_nivel(nivel)
@@ -488,11 +623,11 @@ class GrabadorAudio:
                         pass
 
             stream = sd.InputStream(
-                samplerate=self.sample_rate,
+                samplerate=entrada.sample_rate,
                 channels=entrada.canales,
                 dtype="int16",
                 device=entrada.indice,
-                blocksize=max(256, int(self.sample_rate * 0.1)),
+                blocksize=max(256, int(entrada.sample_rate * 0.1)),
                 callback=callback,
             )
             try:
@@ -513,27 +648,53 @@ class GrabadorAudio:
             if not self.is_recording:
                 return
             transcurrido = time.monotonic() - self._inicio_dispositivo
-            if self._nivel_maximo_dispositivo >= 0.002:
+            # Exigimos tres bloques con señal útil para que un chasquido o el
+            # ruido de apertura del controlador no detenga la búsqueda.
+            if self._bloques_con_senal_dispositivo >= 3:
                 return
             if transcurrido < espera:
                 continue
-            siguiente = self._indice_candidato + 1
-            if siguiente >= len(self._candidatos_entrada):
+            if not self._cambiar_a_siguiente_entrada(
+                sd, callback_nivel, "cambio_automatico"
+            ):
                 activo = self._dispositivo_activo
                 if activo is not None:
                     self._avisar_dispositivo(activo, "sin_senal")
                 return
-            self._indice_candidato = siguiente
-            entrada = self._candidatos_entrada[siguiente]
-            self._cerrar_stream()
-            if not self.is_recording:
-                return
-            try:
-                self._abrir_stream(sd, entrada, callback_nivel)
-                self._avisar_dispositivo(entrada, "cambio_automatico")
-            except Exception as exc:
-                self.ultimo_error = f"{entrada.nombre}: {exc}"
-                self._inicio_dispositivo = 0.0
+
+    def _cambiar_a_siguiente_entrada(
+        self, sd, callback_nivel, motivo: str
+    ) -> bool:
+        """Abre el siguiente candidato disponible, saltando rutas rotas."""
+        if not self._cambio_entrada_lock.acquire(blocking=False):
+            return True
+        try:
+            while self.is_recording:
+                siguiente = self._indice_candidato + 1
+                if siguiente >= len(self._candidatos_entrada):
+                    return False
+                self._indice_candidato = siguiente
+                entrada = self._candidatos_entrada[siguiente]
+                self._cerrar_stream()
+                if not self.is_recording:
+                    return False
+                try:
+                    self._abrir_stream(sd, entrada, callback_nivel)
+                    self._avisar_dispositivo(entrada, motivo)
+                    return True
+                except Exception as exc:
+                    self.ultimo_error = f"{entrada.nombre}: {exc}"
+            return False
+        finally:
+            self._cambio_entrada_lock.release()
+
+    def probar_siguiente_entrada(self) -> bool:
+        """Permite saltar manualmente una ruta muda sin parar la clase."""
+        if not self.is_recording or self._sd is None:
+            return False
+        return self._cambiar_a_siguiente_entrada(
+            self._sd, self._callback_nivel, "cambio_manual"
+        )
 
     def _avisar_dispositivo(self, entrada: DispositivoEntrada, motivo: str) -> None:
         if self._callback_dispositivo:

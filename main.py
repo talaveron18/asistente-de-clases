@@ -11,7 +11,11 @@ import customtkinter as ctk
 
 from biblioteca_medica import BibliotecaMedica, CATEGORIAS
 from config import Config
-from grabador import GrabadorAudio, recuperar_audio_interrumpido
+from grabador import (
+    UMBRAL_SENAL_UTIL,
+    GrabadorAudio,
+    recuperar_audio_interrumpido,
+)
 from interfaz_argos import (
     COLOR_ACENTO,
     COLOR_ALERTA,
@@ -270,9 +274,31 @@ class AsistenteClasesApp(ctk.CTk):
             height=42,
         )
         self.btn_grabar.pack(side="left", padx=(0, 8))
+        self.btn_otra_entrada = ctk.CTkButton(
+            controles,
+            text="Probar otra entrada",
+            command=self._probar_otra_entrada,
+            state="disabled",
+            width=150,
+            height=42,
+            fg_color=COLOR_PANEL_SUAVE,
+            border_width=1,
+            border_color=COLOR_BORDE,
+        )
+        self.btn_otra_entrada.pack(side="left", padx=8)
+        ctk.CTkButton(
+            controles,
+            text="Permisos de Windows",
+            command=self._abrir_ajustes_microfono,
+            width=150,
+            height=42,
+            fg_color="transparent",
+            border_width=1,
+            border_color=COLOR_BORDE,
+        ).pack(side="left", padx=8)
         ctk.CTkLabel(
             controles,
-            text="El botón para detener permanece siempre en la barra superior.",
+            text="ARGOS prueba automáticamente cada entrada hasta encontrar voz.",
             text_color=COLOR_TEXTO_SUAVE,
         ).pack(side="left", padx=8)
         fila_nivel = ctk.CTkFrame(self.tab_grabar, fg_color="transparent")
@@ -805,6 +831,20 @@ class AsistenteClasesApp(ctk.CTk):
             return
 
         self._carpeta_grabacion = carpeta
+        self._registrar_diagnostico_audio(
+            "candidatos",
+            candidatos=[
+                {
+                    "indice": entrada.indice,
+                    "nombre": entrada.nombre,
+                    "frecuencia_nativa": entrada.sample_rate,
+                    "canales": entrada.canales,
+                    "hostapi": entrada.hostapi,
+                }
+                for entrada in self._dispositivos_entrada
+            ],
+        )
+
         self._transcripcion_incremental = TranscripcionIncremental(
             self.transcriptor,
             self.repositorio,
@@ -827,6 +867,11 @@ class AsistenteClasesApp(ctk.CTk):
                 self._actualizar_dispositivo_grabacion, entrada, motivo
             ),
             duracion_fragmento=10.0,
+            segundos_sin_senal=2.5,
+        )
+        self._registrar_diagnostico_audio(
+            "prueba_inicial_senal",
+            resultados=self.grabador.pruebas_senal,
         )
         if not ok:
             self._transcripcion_incremental.cerrar_sin_esperar()
@@ -839,6 +884,15 @@ class AsistenteClasesApp(ctk.CTk):
             )
             messagebox.showerror("Audio", self.grabador.ultimo_error or "No se pudo iniciar la grabación.")
             return
+        dispositivo = next(
+            (
+                entrada
+                for entrada in self._dispositivos_entrada
+                if entrada.indice == self.grabador.dispositivo
+            ),
+            dispositivo,
+        )
+        self._dispositivo_entrada = dispositivo
         self.config_obj.dispositivo_audio = str(dispositivo.indice)
         self.config_obj.sample_rate = dispositivo.sample_rate
         self.config_obj.ultima_materia = materia
@@ -851,6 +905,7 @@ class AsistenteClasesApp(ctk.CTk):
             "Escuchando… El primer texto aparecerá automáticamente en unos segundos."
         )
         self.btn_grabar.configure(state="disabled")
+        self.btn_otra_entrada.configure(state="normal")
         self.btn_detener.configure(state="normal")
         self.estado_grabacion_global.configure(
             text="●  Grabando", text_color=COLOR_PELIGRO
@@ -866,6 +921,15 @@ class AsistenteClasesApp(ctk.CTk):
             self.etiqueta_nivel.configure(text=f"Señal: {nivel * 100:.1f} %")
 
     def _actualizar_dispositivo_grabacion(self, entrada, motivo: str) -> None:
+        self._registrar_diagnostico_audio(
+            motivo,
+            indice=entrada.indice,
+            nombre=entrada.nombre,
+            frecuencia_nativa=entrada.sample_rate,
+            frecuencia_wav=self.grabador.sample_rate if self.grabador else None,
+            canales=entrada.canales,
+            hostapi=entrada.hostapi,
+        )
         detalle_host = f" · {entrada.hostapi}" if entrada.hostapi else ""
         self.etiqueta_micro.configure(
             text=(
@@ -881,6 +945,10 @@ class AsistenteClasesApp(ctk.CTk):
                     f"automáticamente a {entrada.nombre}. Habla para verificarla."
                 )
             )
+        elif motivo == "cambio_manual":
+            self.estado.configure(
+                text=f"Probando manualmente {entrada.nombre}. Habla ahora."
+            )
         elif motivo == "sin_senal":
             self.estado.configure(
                 text=(
@@ -889,6 +957,55 @@ class AsistenteClasesApp(ctk.CTk):
                 )
             )
 
+    def _probar_otra_entrada(self) -> None:
+        if not self.grabador or not self.grabador.esta_grabando():
+            return
+        self.btn_otra_entrada.configure(state="disabled", text="Cambiando…")
+
+        def worker():
+            cambiado = self.grabador.probar_siguiente_entrada()
+            self._enviar_ui(self._fin_cambio_manual, cambiado)
+
+        threading.Thread(
+            target=worker, daemon=True, name="argos-cambio-manual-microfono"
+        ).start()
+
+    def _fin_cambio_manual(self, cambiado: bool) -> None:
+        self.btn_otra_entrada.configure(state="normal", text="Probar otra entrada")
+        if not cambiado:
+            self.estado.configure(
+                text=(
+                    "No quedan entradas nuevas. Abre «Permisos de Windows», "
+                    "habilita el micrófono para aplicaciones de escritorio y reinicia la grabación."
+                )
+            )
+
+    @staticmethod
+    def _abrir_ajustes_microfono() -> None:
+        try:
+            if os.name == "nt":
+                os.startfile("ms-settings:privacy-microphone")
+        except OSError as exc:
+            messagebox.showerror("Micrófono de Windows", str(exc))
+
+    def _registrar_diagnostico_audio(self, evento: str, **datos) -> None:
+        """Conserva evidencia local de qué ruta probó Windows realmente."""
+        carpeta = self._carpeta_grabacion
+        if not carpeta:
+            return
+        registro = {
+            "timestamp": time.time(),
+            "evento": evento,
+            **datos,
+        }
+        try:
+            with (Path(carpeta) / "diagnostico_audio.jsonl").open(
+                "a", encoding="utf-8"
+            ) as archivo:
+                archivo.write(json.dumps(registro, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
     def _actualizar_reloj(self):
         if not self.grabador or not self.grabador.esta_grabando():
             return
@@ -896,7 +1013,7 @@ class AsistenteClasesApp(ctk.CTk):
         h, resto = divmod(segundos, 3600)
         m, s = divmod(resto, 60)
         self.reloj.configure(text=f"{h:02d}:{m:02d}:{s:02d}")
-        if segundos >= 5 and self.grabador.nivel_maximo < 0.002:
+        if segundos >= 5 and self.grabador.nivel_maximo < UMBRAL_SENAL_UTIL:
             self.estado.configure(
                 text=(
                     "ARGOS está grabando, pero no recibe señal del micrófono. "
@@ -988,7 +1105,7 @@ class AsistenteClasesApp(ctk.CTk):
             diagnostico = (
                 "ARGOS apenas recibió señal del micrófono. Revisa el permiso de "
                 "Windows y habla comprobando que la barra azul se mueve."
-                if nivel_maximo < 0.002
+                if nivel_maximo < UMBRAL_SENAL_UTIL
                 else "Llegó señal, pero Whisper no reconoció habla inteligible."
             )
             messagebox.showwarning(
@@ -1011,6 +1128,7 @@ class AsistenteClasesApp(ctk.CTk):
 
     def _restablecer_controles_grabacion(self):
         self.btn_grabar.configure(state="normal")
+        self.btn_otra_entrada.configure(state="disabled", text="Probar otra entrada")
         self.btn_detener.configure(state="disabled", text="Detener y guardar")
         self.estado_grabacion_global.configure(
             text="●  Sin grabación", text_color=COLOR_TEXTO_SUAVE

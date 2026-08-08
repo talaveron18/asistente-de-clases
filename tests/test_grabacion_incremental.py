@@ -9,6 +9,7 @@ import numpy as np
 
 import grabador as modulo_grabador
 from grabador import (
+    UMBRAL_SENAL_UTIL,
     DispositivoEntrada,
     FragmentoAudio,
     GrabadorAudio,
@@ -63,7 +64,96 @@ def test_hardware_automatico_prefiere_microfono_real(monkeypatch):
 
     assert dispositivo.indice == 1
     assert dispositivo.nombre == "Micrófono USB"
-    assert dispositivo.sample_rate == 16000
+    assert dispositivo.sample_rate == 48000
+
+
+def test_hardware_conserva_rutas_con_frecuencias_nativas_distintas(monkeypatch):
+    class Predeterminado:
+        device = (0, 9)
+
+    class SoundDeviceFalso:
+        default = Predeterminado()
+
+        @staticmethod
+        def query_devices():
+            return [
+                {
+                    "name": "Micrófono Realtek WASAPI",
+                    "max_input_channels": 2,
+                    "default_samplerate": 48000,
+                    "hostapi": 0,
+                },
+                {
+                    "name": "Micrófono Realtek MME",
+                    "max_input_channels": 2,
+                    "default_samplerate": 44100,
+                    "hostapi": 1,
+                },
+            ]
+
+        @staticmethod
+        def query_hostapis():
+            return [
+                {"name": "Windows WASAPI", "default_input_device": 0},
+                {"name": "MME", "default_input_device": 1},
+            ]
+
+        @staticmethod
+        def check_input_settings(**_kwargs):
+            return None
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+
+    dispositivos = GrabadorAudio.detectar_dispositivos_entrada(16000)
+
+    assert [entrada.sample_rate for entrada in dispositivos] == [48000, 44100]
+
+
+def test_hardware_prefiere_wasapi_al_clon_mme_predeterminado(monkeypatch):
+    class Predeterminado:
+        device = (0, 9)
+
+    class SoundDeviceFalso:
+        default = Predeterminado()
+
+        @staticmethod
+        def query_devices():
+            return [
+                {
+                    "name": "Micrófono Realtek",
+                    "max_input_channels": 2,
+                    "default_samplerate": 48000,
+                    "hostapi": 0,
+                },
+                {
+                    "name": "Micrófono Realtek",
+                    "max_input_channels": 2,
+                    "default_samplerate": 48000,
+                    "hostapi": 1,
+                },
+            ]
+
+        @staticmethod
+        def query_hostapis():
+            return [
+                {"name": "MME", "default_input_device": 0},
+                {"name": "Windows WASAPI", "default_input_device": 1},
+            ]
+
+        @staticmethod
+        def check_input_settings(**_kwargs):
+            return None
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+
+    dispositivos = GrabadorAudio.detectar_dispositivos_entrada(
+        16000, dispositivo_previo=0
+    )
+
+    assert [(entrada.indice, entrada.hostapi) for entrada in dispositivos] == [
+        (1, "Windows WASAPI"),
+        (0, "MME"),
+    ]
 
 
 def test_hardware_automatico_adapta_frecuencia_nativa(monkeypatch):
@@ -211,6 +301,11 @@ def test_grabador_cambia_automaticamente_si_la_primera_ruta_esta_muda(
         InputStream = StreamFalso
 
     monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+    monkeypatch.setattr(
+        GrabadorAudio,
+        "medir_senal",
+        staticmethod(lambda entrada, duracion=0.35, sd=None: 0.0),
+    )
     entradas = [
         DispositivoEntrada(1, "Micrófono MME", 10, 1, "MME"),
         DispositivoEntrada(2, "Micrófono WASAPI", 10, 1, "WASAPI"),
@@ -231,6 +326,116 @@ def test_grabador_cambia_automaticamente_si_la_primera_ruta_esta_muda(
     assert grabador.dispositivo == 2
     assert (2, "cambio_automatico") in cambios
     assert grabador.nivel_maximo > 0.002
+
+
+def test_prueba_real_descarta_el_mejor_puntuado_si_esta_mudo(
+    tmp_path, monkeypatch
+):
+    aperturas = []
+
+    class StreamFalso:
+        def __init__(self, callback, device, samplerate, **_kwargs):
+            self.callback = callback
+            self.device = device
+            self.samplerate = samplerate
+            aperturas.append(device)
+
+        def start(self):
+            amplitud = 0 if self.device == 1 else 2400
+            self.callback(
+                np.full((int(self.samplerate * 0.1), 1), amplitud, dtype=np.int16),
+                int(self.samplerate * 0.1),
+                None,
+                None,
+            )
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    class SoundDeviceFalso:
+        InputStream = StreamFalso
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+    entradas = [
+        DispositivoEntrada(1, "Realtek WASAPI", 1000, 1, "Windows WASAPI"),
+        DispositivoEntrada(2, "Realtek MME", 1000, 1, "MME"),
+    ]
+    grabador = GrabadorAudio(sample_rate=1000, dispositivo=1)
+
+    assert grabador.iniciar(
+        archivo_salida=str(tmp_path / "audio.wav"),
+        candidatos_entrada=entradas,
+        duracion_fragmento=10,
+    )
+    grabador.detener()
+
+    assert aperturas[:3] == [1, 2, 2]
+    assert grabador.dispositivo == 2
+    assert grabador.pruebas_senal[0]["nivel"] == 0
+    assert grabador.pruebas_senal[1]["nivel"] >= UMBRAL_SENAL_UTIL
+
+
+def test_failover_admite_otra_frecuencia_y_normaliza_el_wav(tmp_path, monkeypatch):
+    hay_senal = threading.Event()
+    frecuencias_abiertas = []
+
+    class StreamFalso:
+        def __init__(self, callback, device, samplerate, **_kwargs):
+            self.callback = callback
+            self.device = device
+            self.samplerate = samplerate
+            frecuencias_abiertas.append((device, samplerate))
+
+        def start(self):
+            cantidad = int(self.samplerate)
+            amplitud = 0 if self.device == 1 else 3000
+            self.callback(
+                np.full((cantidad, 1), amplitud, dtype=np.int16),
+                cantidad,
+                None,
+                None,
+            )
+            if amplitud:
+                hay_senal.set()
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    class SoundDeviceFalso:
+        InputStream = StreamFalso
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+    monkeypatch.setattr(
+        GrabadorAudio,
+        "medir_senal",
+        staticmethod(lambda entrada, duracion=0.35, sd=None: 0.0),
+    )
+    entradas = [
+        DispositivoEntrada(1, "Micrófono 10 Hz", 10, 1, "MME"),
+        DispositivoEntrada(2, "Micrófono 20 Hz", 20, 1, "WASAPI"),
+    ]
+    grabador = GrabadorAudio(sample_rate=10, dispositivo=1)
+
+    assert grabador.iniciar(
+        archivo_salida=str(tmp_path / "audio.wav"),
+        candidatos_entrada=entradas,
+        segundos_sin_senal=0.25,
+        duracion_fragmento=10,
+    )
+    assert hay_senal.wait(timeout=2)
+    grabador.detener()
+
+    assert frecuencias_abiertas == [(1, 10), (2, 20)]
+    with wave.open(str(tmp_path / "audio.wav"), "rb") as archivo:
+        assert archivo.getframerate() == 10
+        muestras = np.frombuffer(archivo.readframes(100), dtype=np.int16)
+    assert muestras[-10:].tolist() == [3000] * 10
 
 
 def test_transcripcion_se_guarda_antes_de_detener(tmp_path):
