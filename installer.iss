@@ -1,6 +1,6 @@
-; ARGOS 0.7.1 — inferencia e importación verificadas
+; ARGOS 0.7.2 — micrófono físico, texto continuo y controles de clase
 #define MyAppName "ARGOS"
-#define MyAppVersion "0.7.1"
+#define MyAppVersion "0.7.2"
 #define MyAppPublisher "Fernando Talaverón"
 #define MyAppExeName "ARGOS.exe"
 

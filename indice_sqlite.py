@@ -158,7 +158,10 @@ class IndiceConocimientoSQLite:
     def _leer_clases(self) -> list[dict]:
         registros: list[dict] = []
         for ficha_path in self.raiz.rglob("ficha.json"):
-            if "Biblioteca médica" in ficha_path.parts:
+            if any(
+                carpeta in ficha_path.parts
+                for carpeta in ("Biblioteca médica", "Papelera ARGOS")
+            ):
                 continue
             carpeta = ficha_path.parent
             try:

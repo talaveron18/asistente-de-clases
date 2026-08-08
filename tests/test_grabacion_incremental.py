@@ -156,6 +156,86 @@ def test_hardware_prefiere_wasapi_al_clon_mme_predeterminado(monkeypatch):
     ]
 
 
+def test_hardware_excluye_mezcla_estereo_aunque_tenga_senal_y_host_preferido(
+    monkeypatch,
+):
+    class Predeterminado:
+        device = (0, 9)
+
+    class SoundDeviceFalso:
+        default = Predeterminado()
+
+        @staticmethod
+        def query_devices():
+            return [
+                {
+                    "name": "Mezcla estéreo (Realtek HD Audio Stereo input)",
+                    "max_input_channels": 2,
+                    "default_samplerate": 48000,
+                    "hostapi": 0,
+                },
+                {
+                    "name": "Micrófono (Realtek(R) Audio)",
+                    "max_input_channels": 2,
+                    "default_samplerate": 48000,
+                    "hostapi": 1,
+                },
+            ]
+
+        @staticmethod
+        def query_hostapis():
+            return [
+                {"name": "Windows WDM-KS", "default_input_device": 0},
+                {"name": "MME", "default_input_device": 1},
+            ]
+
+        @staticmethod
+        def check_input_settings(**_kwargs):
+            return None
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+
+    dispositivos = GrabadorAudio.detectar_dispositivos_entrada(16000, 0)
+
+    assert [(entrada.indice, entrada.nombre) for entrada in dispositivos] == [
+        (1, "Micrófono (Realtek(R) Audio)")
+    ]
+
+
+def test_hardware_no_acepta_loopback_como_unico_microfono(monkeypatch):
+    class Predeterminado:
+        device = (0, 9)
+
+    class SoundDeviceFalso:
+        default = Predeterminado()
+
+        @staticmethod
+        def query_devices():
+            return [
+                {
+                    "name": "Stereo Mix (Realtek Audio)",
+                    "max_input_channels": 2,
+                    "default_samplerate": 48000,
+                    "hostapi": 0,
+                }
+            ]
+
+        @staticmethod
+        def query_hostapis():
+            return [{"name": "Windows WASAPI", "default_input_device": 0}]
+
+        @staticmethod
+        def check_input_settings(**_kwargs):
+            return None
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="micrófono"):
+        GrabadorAudio.detectar_dispositivos_entrada()
+
+
 def test_hardware_automatico_adapta_frecuencia_nativa(monkeypatch):
     class Predeterminado:
         device = (0, 2)
@@ -270,6 +350,49 @@ def test_grabador_usa_el_canal_multicanal_que_contiene_voz(tmp_path, monkeypatch
         muestras = np.frombuffer(archivo.readframes(10), dtype=np.int16)
     assert muestras.tolist() == [2400] * 10
     assert grabador.nivel_maximo > 0.002
+
+
+def test_pausa_omite_audio_y_reanuda_el_mismo_wav(tmp_path, monkeypatch):
+    streams = []
+
+    class StreamFalso:
+        def __init__(self, callback, **_kwargs):
+            self.callback = callback
+            streams.append(self)
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    class SoundDeviceFalso:
+        InputStream = StreamFalso
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+    entrada = DispositivoEntrada(4, "Micrófono Realtek", 10, 1, "WASAPI")
+    grabador = GrabadorAudio(sample_rate=10, dispositivo=4)
+
+    assert grabador.iniciar(
+        archivo_salida=str(tmp_path / "audio.wav"),
+        candidatos_entrada=[entrada],
+        duracion_fragmento=10,
+    )
+    callback = streams[0].callback
+    callback(np.full((10, 1), 1000, dtype=np.int16), 10, None, None)
+    assert grabador.pausar()
+    callback(np.full((10, 1), 9000, dtype=np.int16), 10, None, None)
+    assert grabador.esta_pausado()
+    assert grabador.reanudar()
+    callback(np.full((10, 1), 2000, dtype=np.int16), 10, None, None)
+    grabador.detener()
+
+    with wave.open(str(tmp_path / "audio.wav"), "rb") as archivo:
+        muestras = np.frombuffer(archivo.readframes(100), dtype=np.int16)
+    assert muestras.tolist() == [1000] * 10 + [2000] * 10
 
 
 def test_grabador_cambia_automaticamente_si_la_primera_ruta_esta_muda(
@@ -535,6 +658,68 @@ def test_solapamiento_no_duplica_la_misma_frase(tmp_path):
     assert (carpeta / "transcripcion.txt").read_text(encoding="utf-8").count(
         "Virus ARN"
     ) == 1
+
+
+def test_transcripcion_une_fragmentos_y_elimina_solapamiento_parcial(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    carpeta = repositorio.iniciar_grabacion("Economía", "Trading")
+
+    repositorio.guardar_transcripcion_fragmento(
+        carpeta,
+        1,
+        0,
+        10,
+        [
+            SegmentoTranscrito(
+                1.0,
+                9.8,
+                "Te dicen que multiplicarás tus ahorros. Vas a vivir",
+                "SPEAKER_00",
+                "Docente",
+            )
+        ],
+    )
+    repositorio.guardar_transcripcion_fragmento(
+        carpeta,
+        2,
+        9,
+        19,
+        [
+            SegmentoTranscrito(
+                9.1,
+                18.0,
+                "vas a vivir del trading cada mes.",
+                "SPEAKER_00",
+                "Docente",
+            )
+        ],
+    )
+
+    texto = (carpeta / "transcripcion.txt").read_text(encoding="utf-8")
+    assert texto.count("Docente:") == 1
+    assert texto.casefold().count("vas a vivir") == 1
+    assert "Vas a vivir del trading cada mes." in texto
+
+
+def test_clase_se_puede_renombrar_y_mover_a_papelera(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    carpeta = repositorio.iniciar_grabacion("Microbiología", "Nombre provisional")
+    (carpeta / "nota.txt").write_text("conservar", encoding="utf-8")
+
+    renombrada = repositorio.renombrar_clase(carpeta, "Micobacterias")
+
+    assert renombrada.name.endswith(" · Micobacterias")
+    assert json.loads((renombrada / "ficha.json").read_text(encoding="utf-8"))[
+        "titulo"
+    ] == "Micobacterias"
+    assert repositorio.listar_clases()[0]["ruta"] == str(renombrada)
+
+    papelera = repositorio.eliminar_clase(renombrada)
+
+    assert (papelera / "nota.txt").read_text(encoding="utf-8") == "conservar"
+    assert not renombrada.exists()
+    assert repositorio.listar_clases() == []
+    assert "Papelera ARGOS" not in repositorio.materias()
 
 
 def test_repara_wav_tras_cierre_inesperado_y_crea_tramo_pendiente(tmp_path):

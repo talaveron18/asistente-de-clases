@@ -92,9 +92,13 @@ También puede utilizarse `EJECUTAR.bat`.
 ## Funciones actuales
 
 - Grabación directa a WAV sin acumular la clase completa en memoria.
-- Detección automática del micrófono físico y de su frecuencia compatible.
+- Detección automática del micrófono físico y de su frecuencia compatible;
+  las capturas de salida como Mezcla estéreo y loopback quedan excluidas.
+- Pausa, reanudación y cierre seguro de una grabación sin fragmentar la clase.
 - Transcripción incremental cada pocos segundos con guardado atómico durante
   la grabación; no espera al final de la clase.
+- Transcripción presentada en párrafos continuos y limpieza de las palabras
+  repetidas por el solapamiento entre fragmentos.
 - Fragmentos de audio recuperables y reanudación automática tras un cierre
   inesperado, sin duplicar lo ya transcrito.
 - Faster-Whisper con GPU opcional y retorno a CPU.
@@ -103,6 +107,7 @@ También puede utilizarse `EJECUTAR.bat`.
 - Importación de audio y vídeo largo.
 - Importación unificada de audio, vídeo y documentos, con extracción inmediata.
 - Archivo local por materia, fecha y número.
+- Renombrado de clases y eliminación recuperable mediante Papelera ARGOS.
 - Biblioteca médica para PDF, DOCX, TXT y Markdown.
 - Extracción de PDF por página y detección de documentos que requieren OCR.
 - Índice SQLite FTS5 para clases y documentos.

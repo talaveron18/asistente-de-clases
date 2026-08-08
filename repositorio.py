@@ -14,6 +14,7 @@ from transcriptor import SegmentoTranscrito
 
 
 _FICHA_LOCK = threading.RLock()
+_NOMBRE_PAPELERA = "Papelera ARGOS"
 
 
 def _nombre_seguro(texto: str, fallback: str = "Sin titulo") -> str:
@@ -39,6 +40,104 @@ def _escribir_json_atomico(ruta: Path, datos: dict | list) -> None:
     )
 
 
+def _texto_normalizado(texto: str) -> str:
+    return re.sub(r"\W+", " ", (texto or "").casefold()).strip()
+
+
+def _quitar_solapamiento(texto_anterior: str, texto_nuevo: str) -> str:
+    """Elimina palabras repetidas por el solape entre dos WAV consecutivos."""
+    anteriores = re.findall(r"\S+", texto_anterior.strip())
+    nuevos = re.findall(r"\S+", texto_nuevo.strip())
+    anteriores_norm = [_texto_normalizado(palabra) for palabra in anteriores]
+    nuevos_norm = [_texto_normalizado(palabra) for palabra in nuevos]
+    limite = min(12, len(anteriores_norm), len(nuevos_norm))
+    for cantidad in range(limite, 1, -1):
+        if anteriores_norm[-cantidad:] == nuevos_norm[:cantidad]:
+            return " ".join(nuevos[cantidad:]).strip()
+    return texto_nuevo.strip()
+
+
+def limpiar_segmentos_solapados(
+    segmentos: Iterable[SegmentoTranscrito],
+) -> list[SegmentoTranscrito]:
+    """Ordena segmentos y limpia duplicados exactos o parciales de 1 s."""
+    ordenados = sorted(segmentos, key=lambda item: (item.inicio, item.fin))
+    limpios: list[SegmentoTranscrito] = []
+    for segmento in ordenados:
+        texto = segmento.texto.strip()
+        normalizado = _texto_normalizado(texto)
+        if not normalizado:
+            continue
+        duplicado = any(
+            normalizado == _texto_normalizado(previo.texto)
+            and abs(segmento.inicio - previo.inicio) <= 2.0
+            for previo in limpios[-3:]
+        )
+        if duplicado:
+            continue
+        if limpios:
+            previo = limpios[-1]
+            if (
+                segmento.rol == previo.rol
+                and segmento.inicio <= previo.fin + 2.5
+            ):
+                texto = _quitar_solapamiento(previo.texto, texto)
+                if not _texto_normalizado(texto):
+                    continue
+        limpios.append(
+            SegmentoTranscrito(
+                segmento.inicio,
+                segmento.fin,
+                texto,
+                segmento.hablante_original,
+                segmento.rol,
+            )
+        )
+    return limpios
+
+
+def agrupar_segmentos_para_lectura(
+    segmentos: Iterable[SegmentoTranscrito],
+    duracion_maxima: float = 45.0,
+    caracteres_maximos: int = 560,
+) -> list[SegmentoTranscrito]:
+    """Forma párrafos legibles sin perder la referencia temporal inicial."""
+    resultado: list[SegmentoTranscrito] = []
+    for segmento in limpiar_segmentos_solapados(segmentos):
+        if not resultado:
+            resultado.append(segmento)
+            continue
+        previo = resultado[-1]
+        texto_unido = f"{previo.texto.rstrip()} {segmento.texto.lstrip()}".strip()
+        puede_unirse = (
+            segmento.rol == previo.rol
+            and segmento.inicio - previo.fin <= 4.0
+            and segmento.fin - previo.inicio <= duracion_maxima
+            and len(texto_unido) <= caracteres_maximos
+        )
+        if puede_unirse:
+            resultado[-1] = SegmentoTranscrito(
+                previo.inicio,
+                segmento.fin,
+                texto_unido,
+                previo.hablante_original,
+                previo.rol,
+            )
+        else:
+            resultado.append(segmento)
+    return resultado
+
+
+def formatear_transcripcion_continua(
+    segmentos: Iterable[SegmentoTranscrito],
+) -> str:
+    """Representa una clase en párrafos, no como subtítulos entrecortados."""
+    return "\n\n".join(
+        segmento.a_linea_txt()
+        for segmento in agrupar_segmentos_para_lectura(segmentos)
+    )
+
+
 class RepositorioClases:
     """Organiza las clases por materia, orden, fecha y título."""
 
@@ -48,7 +147,11 @@ class RepositorioClases:
         self.raiz.mkdir(parents=True, exist_ok=True)
 
     def materias(self) -> list[str]:
-        return sorted(p.name for p in self.raiz.iterdir() if p.is_dir())
+        return sorted(
+            p.name
+            for p in self.raiz.iterdir()
+            if p.is_dir() and p.name != _NOMBRE_PAPELERA
+        )
 
     def siguiente_numero(self, materia: str) -> int:
         carpeta = self.raiz / _nombre_seguro(materia, "Sin materia")
@@ -160,20 +263,7 @@ class RepositorioClases:
                     segmentos.append(SegmentoTranscrito(**segmento))
             except (OSError, json.JSONDecodeError, TypeError):
                 continue
-        segmentos.sort(key=lambda item: (item.inicio, item.fin))
-        unicos = []
-        for segmento in segmentos:
-            texto = re.sub(r"\W+", " ", segmento.texto.casefold()).strip()
-            duplicado = any(
-                texto
-                and texto
-                == re.sub(r"\W+", " ", previo.texto.casefold()).strip()
-                and abs(segmento.inicio - previo.inicio) <= 2.0
-                for previo in unicos[-3:]
-            )
-            if not duplicado:
-                unicos.append(segmento)
-        return unicos
+        return limpiar_segmentos_solapados(segmentos)
 
     @staticmethod
     def fragmentos_pendientes(
@@ -250,9 +340,10 @@ class RepositorioClases:
     ) -> None:
         segmentos = list(segmentos)
         titulo = carpeta.name.split(" · ", 2)[-1]
-        txt = "\n".join(s.a_linea_txt() for s in segmentos)
-        md = "# " + titulo + "\n\n" + "\n".join(
-            s.a_linea_markdown() for s in segmentos
+        parrafos = agrupar_segmentos_para_lectura(segmentos)
+        txt = formatear_transcripcion_continua(segmentos)
+        md = "# " + titulo + "\n\n" + "\n\n".join(
+            s.a_linea_markdown() for s in parrafos
         )
         _escribir_texto_atomico(carpeta / "transcripcion.txt", txt)
         _escribir_texto_atomico(carpeta / "transcripcion.md", md)
@@ -282,9 +373,10 @@ class RepositorioClases:
         carpeta_clase = self.raiz / materia_segura / f"{numero:03d} · {fecha:%Y-%m-%d} · {titulo_seguro}"
         carpeta_clase.mkdir(parents=True, exist_ok=False)
 
-        segmentos = list(segmentos)
-        txt = "\n".join(s.a_linea_txt() for s in segmentos)
-        md = "# " + titulo_seguro + "\n\n" + f"**Materia:** {materia_segura}  \n**Fecha:** {fecha:%d/%m/%Y %H:%M}  \n**Clase:** {numero:03d}\n\n" + "\n".join(s.a_linea_markdown() for s in segmentos)
+        segmentos = limpiar_segmentos_solapados(segmentos)
+        parrafos = agrupar_segmentos_para_lectura(segmentos)
+        txt = formatear_transcripcion_continua(segmentos)
+        md = "# " + titulo_seguro + "\n\n" + f"**Materia:** {materia_segura}  \n**Fecha:** {fecha:%d/%m/%Y %H:%M}  \n**Clase:** {numero:03d}\n\n" + "\n\n".join(s.a_linea_markdown() for s in parrafos)
         _escribir_texto_atomico(carpeta_clase / "transcripcion.txt", txt)
         _escribir_texto_atomico(carpeta_clase / "transcripcion.md", md)
 
@@ -332,6 +424,64 @@ class RepositorioClases:
                     clases.append(ficha)
         clases.sort(key=lambda x: x.get("fecha_iso", ""), reverse=True)
         return clases
+
+    def _resolver_clase(self, ruta: str | Path) -> Path:
+        carpeta = Path(ruta).resolve()
+        raiz = self.raiz.resolve()
+        if carpeta == raiz or raiz not in carpeta.parents:
+            raise ValueError("La clase no pertenece al repositorio de ARGOS.")
+        if _NOMBRE_PAPELERA in carpeta.parts or not (carpeta / "ficha.json").is_file():
+            raise ValueError("La carpeta seleccionada no es una clase válida.")
+        return carpeta
+
+    def renombrar_clase(self, ruta: str | Path, nuevo_titulo: str) -> Path:
+        """Actualiza el título y el nombre de carpeta de una clase existente."""
+        carpeta = self._resolver_clase(ruta)
+        titulo = _nombre_seguro(nuevo_titulo, "")
+        if not titulo:
+            raise ValueError("Escribe un nombre válido para la clase.")
+        ficha_path = carpeta / "ficha.json"
+        ficha = json.loads(ficha_path.read_text(encoding="utf-8"))
+        partes = carpeta.name.split(" · ", 2)
+        prefijo = " · ".join(partes[:2]) if len(partes) == 3 else carpeta.name
+        destino = carpeta.with_name(f"{prefijo} · {titulo}")
+        if destino != carpeta and destino.exists():
+            raise FileExistsError("Ya existe una clase con ese nombre.")
+        if destino != carpeta:
+            carpeta.rename(destino)
+        ficha["titulo"] = titulo
+        _escribir_json_atomico(destino / "ficha.json", ficha)
+        transcripcion_md = destino / "transcripcion.md"
+        if transcripcion_md.exists():
+            contenido = transcripcion_md.read_text(encoding="utf-8")
+            lineas = contenido.splitlines()
+            if lineas and lineas[0].startswith("# "):
+                lineas[0] = f"# {titulo}"
+                _escribir_texto_atomico(
+                    transcripcion_md,
+                    "\n".join(lineas) + ("\n" if contenido.endswith("\n") else ""),
+                )
+        return destino
+
+    def eliminar_clase(self, ruta: str | Path) -> Path:
+        """Mueve una clase completa a la papelera interna recuperable."""
+        carpeta = self._resolver_clase(ruta)
+        papelera = self.raiz / _NOMBRE_PAPELERA
+        papelera.mkdir(parents=True, exist_ok=True)
+        sello = datetime.now().strftime("%Y%m%d-%H%M%S")
+        base = f"{sello} · {carpeta.parent.name} · {carpeta.name}"
+        destino = papelera / base
+        contador = 2
+        while destino.exists():
+            destino = papelera / f"{base} · {contador}"
+            contador += 1
+        origen_materia = carpeta.parent
+        shutil.move(str(carpeta), str(destino))
+        try:
+            origen_materia.rmdir()
+        except OSError:
+            pass
+        return destino
 
     def abrir_raiz(self) -> None:
         os.startfile(self.raiz)

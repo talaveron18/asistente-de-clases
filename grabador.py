@@ -18,6 +18,31 @@ import numpy as np
 # el ruido eléctrico de una ruta muda se confunda con voz y bloquee el failover.
 UMBRAL_SENAL_UTIL = 0.01
 
+# PortAudio enumera como entradas tanto los micrófonos como varias capturas de
+# la salida del equipo. Estas últimas pueden entregar una señal perfecta al
+# reproducir un vídeo, pero nunca oyen la habitación. No deben participar en
+# la selección ni en el failover de una grabación de clase.
+PATRONES_CAPTURA_SALIDA = (
+    "mezcla estéreo",
+    "mezcla estereo",
+    "stereo mix",
+    "realtek hd audio stereo input",
+    "what u hear",
+    "wave out mix",
+    "loopback",
+    "monitor of ",
+    "audio output capture",
+    "output capture",
+    "cable output",
+    "voicemeeter output",
+)
+
+
+def es_captura_salida(nombre: str) -> bool:
+    """Indica si una entrada de PortAudio es en realidad audio del sistema."""
+    normalizado = (nombre or "").casefold()
+    return any(patron in normalizado for patron in PATRONES_CAPTURA_SALIDA)
+
 
 def _sounddevice():
     """Carga PortAudio solo cuando se consulta o utiliza el micrófono."""
@@ -124,8 +149,11 @@ class GrabadorAudio:
         self.sample_rate = sample_rate
         self.dispositivo = dispositivo
         self.is_recording = False
+        self.is_paused = False
         self.nivel_actual = 0.0
         self._tiempo_inicio = 0.0
+        self._pausa_iniciada = 0.0
+        self._segundos_pausados = 0.0
         self._stream = None
         self._stream_lock = threading.Lock()
         self._generacion_stream = 0
@@ -169,6 +197,7 @@ class GrabadorAudio:
                 (i, dev["name"])
                 for i, dev in enumerate(sd.query_devices())
                 if dev["max_input_channels"] > 0
+                and not es_captura_salida(str(dev.get("name", "")))
             ]
             # El asignador genérico de Windows no siempre apunta al micrófono
             # esperado. Priorizamos el dispositivo de entrada real configurado
@@ -240,6 +269,8 @@ class GrabadorAudio:
             if int(datos.get("max_input_channels", 0)) <= 0:
                 continue
             nombre = str(datos.get("name", f"Entrada {indice}"))
+            if es_captura_salida(nombre):
+                continue
             puntuacion = 0
             if indice == predeterminado:
                 # El predeterminado global de PortAudio pertenece al host API
@@ -426,6 +457,9 @@ class GrabadorAudio:
             return False
 
         self.ultimo_error = None
+        self.is_paused = False
+        self._pausa_iniciada = 0.0
+        self._segundos_pausados = 0.0
         self._archivo_salida = os.path.abspath(archivo_salida)
         os.makedirs(os.path.dirname(self._archivo_salida), exist_ok=True)
         self._directorio_fragmentos = (
@@ -492,7 +526,7 @@ class GrabadorAudio:
             self._wav.setframerate(self.sample_rate)
 
             self.is_recording = True
-            self._tiempo_inicio = time.time()
+            self._tiempo_inicio = time.monotonic()
             self._abrir_stream(
                 sd,
                 self._candidatos_entrada[0],
@@ -517,7 +551,11 @@ class GrabadorAudio:
     def detener(self, archivo_salida: Optional[str] = None):
         if not self.is_recording:
             return None
+        if self.is_paused and self._pausa_iniciada:
+            self._segundos_pausados += time.monotonic() - self._pausa_iniciada
         self.is_recording = False
+        self.is_paused = False
+        self._pausa_iniciada = 0.0
         self._generacion_stream += 1
         self._cerrar_recursos()
         hilo = self._hilo_supervision
@@ -529,6 +567,39 @@ class GrabadorAudio:
         if not ruta or not os.path.exists(ruta) or os.path.getsize(ruta) <= 44:
             return None
         return ruta
+
+    def pausar(self) -> bool:
+        """Suspende la captura sin cerrar el WAV ni perder la clase."""
+        if not self.is_recording or self.is_paused:
+            return False
+        self.is_paused = True
+        self._pausa_iniciada = time.monotonic()
+        self.nivel_actual = 0.0
+        with self._lock:
+            # Materializa el tramo hablado anterior a la pausa para que pueda
+            # transcribirse mientras la clase permanece suspendida.
+            self._encolar_buffer_fragmento()
+        if self._callback_nivel:
+            try:
+                self._callback_nivel(0.0)
+            except Exception:
+                pass
+        return True
+
+    def reanudar(self) -> bool:
+        """Continúa la misma grabación y conserva una cronología sin la pausa."""
+        if not self.is_recording or not self.is_paused:
+            return False
+        if self._pausa_iniciada:
+            self._segundos_pausados += time.monotonic() - self._pausa_iniciada
+        self._pausa_iniciada = 0.0
+        self.is_paused = False
+        # La pausa no debe confundirse con una entrada muda y provocar un
+        # cambio automático de dispositivo al volver.
+        self._inicio_dispositivo = time.monotonic()
+        self._nivel_maximo_dispositivo = 0.0
+        self._bloques_con_senal_dispositivo = 0
+        return True
 
     def _acumular_fragmento(self, datos: bytes, frames: int) -> None:
         """Se ejecuta bajo ``_lock`` y nunca realiza E/S de disco."""
@@ -596,7 +667,11 @@ class GrabadorAudio:
             def callback(indata, frames, time_info, status):
                 if status:
                     print(f"Aviso de audio: {status}")
-                if not self.is_recording or generacion != self._generacion_stream:
+                if (
+                    not self.is_recording
+                    or self.is_paused
+                    or generacion != self._generacion_stream
+                ):
                     return
                 mono, canal, rms = self._canal_con_mas_senal(indata)
                 mono = self._remuestrear_mono(
@@ -647,6 +722,8 @@ class GrabadorAudio:
             time.sleep(min(0.2, espera))
             if not self.is_recording:
                 return
+            if self.is_paused:
+                continue
             transcurrido = time.monotonic() - self._inicio_dispositivo
             # Exigimos tres bloques con señal útil para que un chasquido o el
             # ruido de apertura del controlador no detenga la búsqueda.
@@ -690,7 +767,7 @@ class GrabadorAudio:
 
     def probar_siguiente_entrada(self) -> bool:
         """Permite saltar manualmente una ruta muda sin parar la clase."""
-        if not self.is_recording or self._sd is None:
+        if not self.is_recording or self.is_paused or self._sd is None:
             return False
         return self._cambiar_a_siguiente_entrada(
             self._sd, self._callback_nivel, "cambio_manual"
@@ -794,10 +871,18 @@ class GrabadorAudio:
                     pass
 
     def obtener_duracion(self):
-        return time.time() - self._tiempo_inicio if self._tiempo_inicio else 0
+        if not self._tiempo_inicio:
+            return 0
+        pausados = self._segundos_pausados
+        if self.is_paused and self._pausa_iniciada:
+            pausados += time.monotonic() - self._pausa_iniciada
+        return max(0.0, time.monotonic() - self._tiempo_inicio - pausados)
 
     def esta_grabando(self):
         return self.is_recording
+
+    def esta_pausado(self):
+        return self.is_paused
 
     def obtener_nivel(self):
         return self.nivel_actual

@@ -90,6 +90,27 @@ def test_indice_prefiere_transcripcion_medica_revisada(tmp_path):
     assert "revisión médica" in resultados[0].ubicacion
 
 
+def test_indice_ignora_clases_movidas_a_papelera(tmp_path):
+    raiz = tmp_path / "Asistente de Clases"
+    clase = raiz / "Papelera ARGOS" / "20260808-120000 · Micro · 001 · Virus"
+    clase.mkdir(parents=True)
+    (clase / "ficha.json").write_text(
+        json.dumps({"materia": "Micro", "titulo": "Virus"}),
+        encoding="utf-8",
+    )
+    (clase / "transcripcion.txt").write_text(
+        "[00:10] Docente: contenido exclusivo eliminado sobre arbovirus.",
+        encoding="utf-8",
+    )
+
+    indice = IndiceConocimientoSQLite(str(raiz))
+    stats = indice.reconstruir()
+    resultados = indice.buscar("arbovirus", alcance="Clases")
+
+    assert stats["clases"] == 0
+    assert resultados == []
+
+
 @pytest.mark.parametrize(
     "clave_historica",
     ["ruta_extraccion", "ruta_indice_texto", "indice_texto"],
