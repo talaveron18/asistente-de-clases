@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from biblioteca_medica import BibliotecaMedica, CATEGORIAS
+from biblioteca_medica import BibliotecaMedica, CATEGORIAS, EXTENSIONES_ADMITIDAS
 from config import Config
 from grabador import (
     UMBRAL_SENAL_UTIL,
@@ -192,8 +192,8 @@ class AsistenteClasesApp(ctk.CTk):
         ).pack(fill="x", padx=18)
         ctk.CTkButton(
             importar,
-            text="Seleccionar archivo",
-            command=lambda: self.tabs.set("Importar archivo"),
+            text="Subir archivo",
+            command=self._abrir_importador_desde_inicio,
             fg_color=COLOR_PANEL_SUAVE,
             border_width=1,
             border_color=COLOR_BORDE,
@@ -350,20 +350,22 @@ class AsistenteClasesApp(ctk.CTk):
         panel.pack(fill="x", padx=24, pady=(0, 12))
         self.etiqueta_archivo = ctk.CTkLabel(panel, text="Ningún audio o vídeo seleccionado", anchor="w")
         self.etiqueta_archivo.pack(side="left", fill="x", expand=True, padx=16, pady=14)
-        ctk.CTkButton(
+        self.btn_seleccionar_archivo = ctk.CTkButton(
             panel,
-            text="Seleccionar archivo",
+            text="Seleccionar audio, vídeo o documento",
             command=self._seleccionar_archivo,
             fg_color=COLOR_PANEL_SUAVE,
             border_width=1,
             border_color=COLOR_BORDE,
-        ).pack(side="left", padx=6)
-        ctk.CTkButton(
+        )
+        self.btn_seleccionar_archivo.pack(side="left", padx=6)
+        self.btn_transcribir_archivo = ctk.CTkButton(
             panel,
             text="Transcribir y guardar",
             command=self._transcribir_archivo,
             fg_color=COLOR_ACENTO,
-        ).pack(side="left", padx=(0, 16))
+        )
+        self.btn_transcribir_archivo.pack(side="left", padx=(0, 16))
         ctk.CTkLabel(
             self.tab_archivo,
             text="Admite vídeos largos. Solo usa su audio y no copia el vídeo original.",
@@ -690,19 +692,71 @@ class AsistenteClasesApp(ctk.CTk):
         )
         if not rutas:
             return
-        nuevos, repetidos, errores = 0, 0, []
+        self._importar_y_procesar_documentos(rutas, categoria)
+
+    def _importar_y_procesar_documentos(self, rutas, categoria="Tratados"):
+        nuevos, repetidos, errores, ids_nuevos = 0, 0, [], []
         for ruta in rutas:
             try:
-                _, creado = self.biblioteca_medica.importar_archivo(ruta, categoria)
+                item, creado = self.biblioteca_medica.importar_archivo(
+                    ruta, categoria
+                )
                 nuevos += int(creado)
                 repetidos += int(not creado)
+                if creado or item.get("estado_indice_ia") in {
+                    "pendiente",
+                    "error",
+                    "procesando",
+                }:
+                    ids_nuevos.append(item["id"])
             except Exception as exc:
                 errores.append(f"{Path(ruta).name}: {exc}")
         self._refrescar_documentos()
         mensaje = f"Importados: {nuevos}. Ya existentes: {repetidos}."
         if errores:
             mensaje += "\n\nErrores:\n" + "\n".join(errores[:5])
+        if not ids_nuevos:
+            messagebox.showinfo("Biblioteca médica", mensaje)
+            return
+        self.estado_documentos.configure(
+            text=f"Extrayendo texto de {len(ids_nuevos)} documento(s)…"
+        )
+
+        def worker():
+            errores_extraccion = []
+            total = len(ids_nuevos)
+            for posicion, item_id in enumerate(ids_nuevos, 1):
+                try:
+                    self.biblioteca_medica.procesar_documento(
+                        item_id,
+                        lambda msg, p, pos=posicion: self.after(
+                            0,
+                            self._actualizar_progreso_documentos,
+                            msg,
+                            ((pos - 1) + p) / total,
+                        ),
+                    )
+                except Exception as exc:
+                    errores_extraccion.append(str(exc))
+            self.after(0, self._refrescar_documentos)
+            self.after(
+                0,
+                self._fin_importacion_documentos,
+                mensaje,
+                errores_extraccion,
+            )
+
+        threading.Thread(
+            target=worker, daemon=True, name="argos-importacion-documentos"
+        ).start()
+
+    def _fin_importacion_documentos(self, mensaje, errores):
+        self._actualizar_progreso_documentos("Finalizado", 0)
+        if errores:
+            mensaje += "\n\nErrores de extracción:\n" + "\n".join(errores[:5])
         messagebox.showinfo("Biblioteca médica", mensaje)
+        if not errores and hasattr(self, "_reconstruir_indice"):
+            self._reconstruir_indice()
 
     def _procesar_un_documento(self, item_id):
         def worker():
@@ -1141,17 +1195,34 @@ class AsistenteClasesApp(ctk.CTk):
         self._carpeta_grabacion = None
         self._transcripcion_incremental = None
 
+    def _abrir_importador_desde_inicio(self):
+        self.tabs.set("Importar archivo")
+        self.after(50, self._seleccionar_archivo)
+
     def _seleccionar_archivo(self):
         ruta = filedialog.askopenfilename(
-            title="Seleccionar audio o vídeo",
+            title="Seleccionar audio, vídeo o documento",
             filetypes=[
-                ("Audio y vídeo", "*.wav *.mp3 *.m4a *.flac *.ogg *.wma *.aac *.opus *.mp4 *.mkv *.mov *.avi *.webm *.m4v *.wmv *.mpeg *.mpg *.ts"),
+                ("Archivos compatibles", "*.wav *.mp3 *.m4a *.flac *.ogg *.wma *.aac *.opus *.mp4 *.mkv *.mov *.avi *.webm *.m4v *.wmv *.mpeg *.mpg *.ts *.pdf *.docx *.txt *.md"),
                 ("Vídeos", "*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.wmv *.mpeg *.mpg *.ts"),
                 ("Audios", "*.wav *.mp3 *.m4a *.flac *.ogg *.wma *.aac *.opus"),
+                ("Documentos", "*.pdf *.docx *.txt *.md"),
                 ("Todos", "*.*"),
             ],
         )
         if ruta:
+            if Path(ruta).suffix.lower() in EXTENSIONES_ADMITIDAS:
+                self.tabs.set("Biblioteca")
+                categoria = self.categoria_documentos.get()
+                if categoria == "Todas":
+                    categoria = "Tratados"
+                self._importar_y_procesar_documentos([ruta], categoria)
+                return
+            if tipo_archivo(ruta) == "desconocido":
+                messagebox.showerror(
+                    "Importar archivo", "Ese formato no es compatible con ARGOS."
+                )
+                return
             self.ruta_archivo = ruta
             etiqueta = "Vídeo" if tipo_archivo(ruta) == "video" else "Audio"
             self.etiqueta_archivo.configure(text=f"{etiqueta}: {ruta}")
@@ -1174,6 +1245,10 @@ class AsistenteClasesApp(ctk.CTk):
         barra = self.progreso_grabar if tab == "grabar" else self.progreso_archivo
         caja = self.texto_grabar if tab == "grabar" else self.texto_archivo
         caja.delete("1.0", "end")
+        if tab == "archivo":
+            self.btn_seleccionar_archivo.configure(state="disabled")
+            self.btn_transcribir_archivo.configure(state="disabled")
+            self.estado.configure(text="Preparando el archivo para transcribir…")
 
         def callback_media(msg, progreso):
             self.after(0, self._progreso, barra, msg, progreso)
@@ -1201,6 +1276,13 @@ class AsistenteClasesApp(ctk.CTk):
             finally:
                 if temporal:
                     eliminar_temporal(ruta_procesable)
+                if tab == "archivo":
+                    self.after(
+                        0, self.btn_seleccionar_archivo.configure, {"state": "normal"}
+                    )
+                    self.after(
+                        0, self.btn_transcribir_archivo.configure, {"state": "normal"}
+                    )
         threading.Thread(target=worker, daemon=True).start()
 
     def _progreso(self, barra, mensaje, valor):

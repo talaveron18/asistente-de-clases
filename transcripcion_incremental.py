@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import queue
+import json
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -131,10 +133,33 @@ class TranscripcionIncremental:
                 ultimo_error = exc
         mensaje = f"Fragmento {fragmento.indice}: {ultimo_error}"
         self._errores.append(mensaje)
+        self._registrar_error(fragmento, ultimo_error)
         self._estado(
-            "Un fragmento no pudo transcribirse, pero su audio está guardado "
-            "y se recuperará al reiniciar ARGOS."
+            "No se pudo transcribir este fragmento; el audio está protegido. "
+            f"Detalle: {ultimo_error}"
         )
+
+    def _registrar_error(self, fragmento: FragmentoAudio, error: Exception) -> None:
+        registro = {
+            "timestamp": time.time(),
+            "fragmento": fragmento.indice,
+            "ruta": fragmento.ruta,
+            "inicio": fragmento.inicio,
+            "fin": fragmento.fin,
+            "modelo": getattr(self.transcriptor, "model_size", "desconocido"),
+            "dispositivo": getattr(
+                self.transcriptor, "dispositivo_real", "desconocido"
+            ),
+            "error_tipo": type(error).__name__,
+            "error": str(error),
+        }
+        try:
+            with (self.carpeta / "diagnostico_transcripcion.jsonl").open(
+                "a", encoding="utf-8"
+            ) as archivo:
+                archivo.write(json.dumps(registro, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
     def _estado(self, mensaje: str) -> None:
         if self.callback_estado:

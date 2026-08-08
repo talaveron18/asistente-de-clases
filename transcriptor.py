@@ -70,8 +70,13 @@ class TranscriptorClases:
         self.diarizacion_disponible = False
         self.dispositivo_real = "cpu"
         self._transcripcion_lock = threading.Lock()
+        self._whisper_model_cls = None
+        self._callback_status = None
+        self.ultimo_aviso = ""
 
     def cargar_modelos(self, callback_status: Optional[Callable] = None):
+        self._callback_status = callback_status
+
         def status(msg, p=0.0):
             print(f"[Carga] {msg}")
             if callback_status:
@@ -82,6 +87,8 @@ class TranscriptorClases:
 
         status(f"Cargando Whisper {self.model_size}...", 0.1)
         from faster_whisper import WhisperModel
+
+        self._whisper_model_cls = WhisperModel
 
         # Faster-Whisper comprueba CUDA directamente. Así no necesitamos
         # empaquetar PyTorch en el instalador básico.
@@ -133,6 +140,68 @@ class TranscriptorClases:
         self.modelos_cargados = True
         status("Modelos listos.", 1.0)
 
+    def _avisar(self, mensaje: str, progreso: float = 0.0) -> None:
+        self.ultimo_aviso = mensaje
+        print(f"[Whisper] {mensaje}")
+        if self._callback_status:
+            self._callback_status(mensaje, progreso)
+
+    def _cambiar_a_cpu(self, error_gpu: Exception) -> None:
+        """Recupera una inferencia CUDA rota sin perder la clase.
+
+        CTranslate2 puede construir el modelo CUDA y descubrir que faltan
+        cuBLAS/cuDNN únicamente al ejecutar la primera transcripción. Por eso
+        comprobar solo ``WhisperModel(...)`` no demuestra que la GPU funcione.
+        """
+        if self.dispositivo_real != "cuda":
+            raise error_gpu
+        if self._whisper_model_cls is None:
+            from faster_whisper import WhisperModel
+
+            self._whisper_model_cls = WhisperModel
+        self._avisar(
+            "La GPU no pudo transcribir; ARGOS continúa automáticamente por CPU.",
+            0.04,
+        )
+        self.whisper_model = self._whisper_model_cls(
+            self.model_size,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=max(1, (os.cpu_count() or 4) - 1),
+        )
+        self.dispositivo_real = "cpu"
+        if self.diarization_pipeline is not None:
+            try:
+                import torch
+
+                self.diarization_pipeline.to(torch.device("cpu"))
+            except Exception:
+                self.diarization_pipeline = None
+                self.diarizacion_disponible = False
+
+    def _inferir(self, archivo_audio: str, **opciones):
+        """Materializa el generador dentro del bloqueo y reintenta en CPU."""
+        with self._transcripcion_lock:
+            try:
+                segmentos_iter, info = self.whisper_model.transcribe(
+                    archivo_audio, **opciones
+                )
+                return list(segmentos_iter), info
+            except Exception as error_gpu:
+                if self.dispositivo_real != "cuda":
+                    raise
+                self._cambiar_a_cpu(error_gpu)
+                try:
+                    segmentos_iter, info = self.whisper_model.transcribe(
+                        archivo_audio, **opciones
+                    )
+                    return list(segmentos_iter), info
+                except Exception as error_cpu:
+                    raise RuntimeError(
+                        "Whisper falló primero en GPU y también al reintentarlo "
+                        f"por CPU. GPU: {error_gpu}. CPU: {error_cpu}"
+                    ) from error_cpu
+
     def transcribir_archivo(self, archivo_audio: str, callback_progreso=None, min_hablantes: int = 2, max_hablantes: int = 10):
         if not self.modelos_cargados or self.whisper_model is None:
             raise RuntimeError("Los modelos no están cargados.")
@@ -145,16 +214,14 @@ class TranscriptorClases:
 
         prog("Transcribiendo con Whisper...", 0.05)
         language = None if self.idioma == "auto" else self.idioma
-        with self._transcripcion_lock:
-            segmentos_iter, _info = self.whisper_model.transcribe(
-                archivo_audio,
-                language=language,
-                beam_size=3,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 500},
-                condition_on_previous_text=True,
-            )
-            segmentos_whisper = list(segmentos_iter)
+        segmentos_whisper, _info = self._inferir(
+            archivo_audio,
+            language=language,
+            beam_size=3,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            condition_on_previous_text=True,
+        )
         if not segmentos_whisper:
             return []
         prog(f"Texto detectado: {len(segmentos_whisper)} segmentos.", 0.55)
@@ -191,25 +258,31 @@ class TranscriptorClases:
         if not os.path.isfile(archivo_audio):
             raise FileNotFoundError(archivo_audio)
         language = None if self.idioma == "auto" else self.idioma
-        with self._transcripcion_lock:
-            segmentos_iter, _info = self.whisper_model.transcribe(
-                archivo_audio,
-                language=language,
-                beam_size=3,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 350},
-                condition_on_previous_text=False,
+        opciones = {
+            "language": language,
+            "beam_size": 3,
+            "vad_filter": True,
+            "vad_parameters": {"min_silence_duration_ms": 350},
+            "condition_on_previous_text": False,
+        }
+        segmentos_iter, _info = self._inferir(archivo_audio, **opciones)
+        # En micrófonos con ganancia baja, Silero puede considerar silencioso
+        # un fragmento que sí contiene voz. Un segundo intento sin VAD se hace
+        # solo para fragmentos cortos; nunca obliga a repetir un vídeo largo.
+        if not segmentos_iter:
+            opciones["vad_filter"] = False
+            opciones.pop("vad_parameters", None)
+            segmentos_iter, _info = self._inferir(archivo_audio, **opciones)
+        return [
+            SegmentoTranscrito(
+                segmento.start,
+                segmento.end,
+                segmento.text,
+                "SPEAKER_00",
+                "Docente",
             )
-            return [
-                SegmentoTranscrito(
-                    segmento.start,
-                    segmento.end,
-                    segmento.text,
-                    "SPEAKER_00",
-                    "Docente",
-                )
-                for segmento in segmentos_iter
-            ]
+            for segmento in segmentos_iter
+        ]
 
     @staticmethod
     def _fusionar(segmentos_whisper, turnos):

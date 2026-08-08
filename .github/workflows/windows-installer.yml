@@ -106,6 +106,56 @@ jobs:
           }
           Stop-Process -Id $proceso.Id -Force
 
+      - name: Exigir transcripción e importación reales en el ejecutable
+        shell: pwsh
+        run: |
+          $audio = Join-Path $env:RUNNER_TEMP "argos-voz-prueba.wav"
+          Add-Type -AssemblyName System.Speech
+          $voz = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          try {
+            $voz.SetOutputToWaveFile($audio)
+            $voz.Speak("Argos automatic transcription test with human speech")
+          } finally {
+            $voz.Dispose()
+          }
+          if (-not (Test-Path $audio)) {
+            throw "Windows no pudo generar la muestra de voz de validación"
+          }
+
+          $video = Join-Path $env:RUNNER_TEMP "argos-video-prueba.mp4"
+          & "dist\ARGOS\ffmpeg.exe" -y -hide_banner -loglevel error `
+            -i $audio -c:a aac -vn $video
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $video)) {
+            throw "No se pudo generar el vídeo de validación"
+          }
+
+          $documento = Join-Path $env:RUNNER_TEMP "argos-documento-prueba.txt"
+          "Texto médico de prueba para validar la biblioteca de ARGOS." | `
+            Set-Content -Path $documento -Encoding utf8
+          $env:ARGOS_SELFTEST_AUDIO = $audio
+          $env:ARGOS_SELFTEST_VIDEO = $video
+          $env:ARGOS_SELFTEST_DOCUMENT = $documento
+          $env:ARGOS_SELFTEST_RESULT = Join-Path `
+            $env:RUNNER_TEMP "argos-runtime-selftest.json"
+          Remove-Item $env:ARGOS_SELFTEST_RESULT -Force `
+            -ErrorAction SilentlyContinue
+
+          $prueba = Start-Process "dist\ARGOS\ARGOS.exe" `
+            -PassThru -Wait
+          if (-not (Test-Path $env:ARGOS_SELFTEST_RESULT)) {
+            throw "ARGOS no escribió el resultado de la autoprueba"
+          }
+          $resultado = Get-Content $env:ARGOS_SELFTEST_RESULT `
+            -Raw | ConvertFrom-Json
+          if ($prueba.ExitCode -ne 0 -or -not $resultado.ok) {
+            throw "Falló la inferencia empaquetada: $($resultado | ConvertTo-Json -Compress)"
+          }
+          if ($resultado.audio_segmentos -lt 1 `
+              -or $resultado.video_segmentos -lt 1 `
+              -or $resultado.documento_caracteres -lt 1) {
+            throw "El ejecutable no procesó los tres archivos reales"
+          }
+
       - name: Instalar Inno Setup
         shell: pwsh
         run: choco install innosetup --yes --no-progress

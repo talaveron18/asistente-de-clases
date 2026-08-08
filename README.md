@@ -68,6 +68,10 @@ argos_app.py
 
 El instalador incluye ARGOS y FFmpeg. No requiere Python ni una instalación manual de FFmpeg.
 
+El workflow no se limita a abrir el modelo: genera una muestra hablada y exige
+que el ejecutable empaquetado transcriba audio y vídeo y extraiga un documento
+antes de publicar el instalador.
+
 El único workflow es:
 
 ```text
@@ -94,8 +98,10 @@ También puede utilizarse `EJECUTAR.bat`.
 - Fragmentos de audio recuperables y reanudación automática tras un cierre
   inesperado, sin duplicar lo ya transcrito.
 - Faster-Whisper con GPU opcional y retorno a CPU.
+- Retorno automático a CPU si CUDA carga el modelo pero falla al transcribir.
 - Diarización opcional mediante Pyannote cuando se instala y configura.
 - Importación de audio y vídeo largo.
+- Importación unificada de audio, vídeo y documentos, con extracción inmediata.
 - Archivo local por materia, fecha y número.
 - Biblioteca médica para PDF, DOCX, TXT y Markdown.
 - Extracción de PDF por página y detección de documentos que requieren OCR.

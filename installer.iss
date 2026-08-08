@@ -1,6 +1,6 @@
-; ARGOS 0.7.0 — interfaz de estudio rediseñada
+; ARGOS 0.7.1 — inferencia e importación verificadas
 #define MyAppName "ARGOS"
-#define MyAppVersion "0.7.0"
+#define MyAppVersion "0.7.1"
 #define MyAppPublisher "Fernando Talaverón"
 #define MyAppExeName "ARGOS.exe"
 

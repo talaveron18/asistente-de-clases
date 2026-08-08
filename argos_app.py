@@ -552,4 +552,8 @@ def ejecutar_argos() -> int:
 
 
 if __name__ == "__main__":
+    if os.environ.get("ARGOS_SELFTEST_RESULT"):
+        from autoprueba_runtime import ejecutar_autoprueba_desde_entorno
+
+        raise SystemExit(ejecutar_autoprueba_desde_entorno())
     raise SystemExit(ejecutar_argos())
