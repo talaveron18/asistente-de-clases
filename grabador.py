@@ -630,9 +630,10 @@ class GrabadorAudio:
     ) -> np.ndarray:
         """Normaliza un bloque mono sin exigir una frecuencia al controlador.
 
-        La interpolación lineal es suficiente para voz y evita añadir otra
-        dependencia pesada al instalador. El tamaño de bloque de 100 ms hace
-        que el coste y el error temporal sean despreciables para transcripción.
+        La interpolación lineal evita añadir otra dependencia pesada al
+        instalador. Antes de reducir la frecuencia se aplica un filtro de
+        media móvil para que el contenido situado por encima de la nueva banda
+        de Nyquist no se pliegue sobre las frecuencias de voz.
         """
         muestras = np.asarray(muestras, dtype=np.int16)
         if (
@@ -642,6 +643,18 @@ class GrabadorAudio:
             or frecuencia_destino <= 0
         ):
             return np.ascontiguousarray(muestras, dtype=np.int16)
+        muestras_float = muestras.astype(np.float64)
+        if frecuencia_origen > frecuencia_destino:
+            factor = max(2, int(round(frecuencia_origen / frecuencia_destino)))
+            nucleo = np.full(factor, 1.0 / factor, dtype=np.float64)
+            margen_izquierdo = (factor - 1) // 2
+            margen_derecho = factor - 1 - margen_izquierdo
+            extendidas = np.pad(
+                muestras_float,
+                (margen_izquierdo, margen_derecho),
+                mode="edge",
+            )
+            muestras_float = np.convolve(extendidas, nucleo, mode="valid")
         cantidad = max(
             1, int(round(muestras.size * frecuencia_destino / frecuencia_origen))
         )
@@ -650,7 +663,7 @@ class GrabadorAudio:
             0, muestras.size - 1, cantidad, dtype=np.float64
         )
         remuestreadas = np.interp(
-            posiciones_destino, posiciones_origen, muestras.astype(np.float64)
+            posiciones_destino, posiciones_origen, muestras_float
         )
         return np.ascontiguousarray(np.rint(remuestreadas), dtype=np.int16)
 
