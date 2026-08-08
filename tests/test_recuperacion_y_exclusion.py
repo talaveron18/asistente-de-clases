@@ -158,6 +158,30 @@ def test_pid_reutilizado_no_mantiene_un_bloqueo(tmp_path, monkeypatch):
     assert not ruta.exists()
 
 
+def test_liberacion_reintenta_si_windows_bloquea_el_archivo(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / ".lock"
+    unlink_original = Path.unlink
+    intentos = 0
+
+    def unlink_con_bloqueo_transitorio(self, *args, **kwargs):
+        nonlocal intentos
+        if self == ruta:
+            intentos += 1
+            if intentos == 1:
+                raise PermissionError("archivo abierto transitoriamente")
+        return unlink_original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_con_bloqueo_transitorio)
+
+    with BloqueoArchivo(ruta):
+        assert ruta.exists()
+
+    assert intentos == 2
+    assert not ruta.exists()
+
+
 def test_segunda_ventana_no_crea_otra_cola(tmp_path, monkeypatch):
     ruta_lock = tmp_path / ".argos_instancia.lock"
     monkeypatch.setattr(argos_app, "_ruta_bloqueo_instancia", lambda: ruta_lock)

@@ -214,9 +214,22 @@ class BloqueoArchivo:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self._limpiar_descriptor()
-        try:
-            datos = json.loads(self.ruta.read_text(encoding="utf-8"))
-            if datos.get("token") == self._token:
+        # En Windows otro hilo que esté comprobando el lock puede mantener
+        # abierto el archivo durante unos milisegundos. Un único unlink en ese
+        # instante falla con PermissionError y dejaría un bloqueo vivo hasta
+        # agotar los 300 s de espera de la biblioteca. Reintentamos brevemente
+        # sin borrar nunca un lock que ya pertenezca a otro propietario.
+        limite = time.monotonic() + 1.0
+        while True:
+            try:
+                datos = json.loads(self.ruta.read_text(encoding="utf-8"))
+                if datos.get("token") != self._token:
+                    return
                 self.ruta.unlink()
-        except (OSError, json.JSONDecodeError):
-            pass
+                return
+            except FileNotFoundError:
+                return
+            except (OSError, json.JSONDecodeError):
+                if time.monotonic() >= limite:
+                    return
+                time.sleep(0.01)
