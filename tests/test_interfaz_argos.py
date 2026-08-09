@@ -1,6 +1,17 @@
+import json
+import queue
+import threading
+from types import SimpleNamespace
 from pathlib import Path
 
-from interfaz_argos import NavegacionArgos, leer_material_clase
+from interfaz_argos import (
+    ARCHIVOS_MATERIAL_COMPLETO,
+    NavegacionArgos,
+    leer_estado_material_clase,
+    leer_material_clase,
+    preparar_material_para_lectura,
+)
+from main import AsistenteClasesApp
 
 
 def test_navegacion_prioriza_el_flujo_del_estudiante():
@@ -45,3 +56,95 @@ def test_redisenio_no_contiene_marca_ni_textos_de_proactor():
     ).lower()
     assert "proactor" not in codigo
     assert "potor" not in codigo
+
+
+def test_estado_material_exige_todos_los_archivos_obligatorios(tmp_path):
+    (tmp_path / "transcripcion.txt").write_text("Clase útil", encoding="utf-8")
+    (tmp_path / "estado_argos.json").write_text(
+        json.dumps({"estado": "completado"}), encoding="utf-8"
+    )
+
+    assert leer_estado_material_clase(tmp_path).clave == "incompleto"
+
+    for nombre in ARCHIVOS_MATERIAL_COMPLETO:
+        (tmp_path / nombre).write_text("contenido", encoding="utf-8")
+
+    estado = leer_estado_material_clase(tmp_path)
+    assert estado.clave == "listo"
+    assert estado.etiqueta == "Material listo"
+
+
+def test_estado_material_muestra_el_error_persistente(tmp_path):
+    (tmp_path / "estado_argos.json").write_text(
+        json.dumps(
+            {
+                "estado": "error",
+                "error": {"mensaje": "Falló la generación de preguntas"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    estado = leer_estado_material_clase(tmp_path)
+
+    assert estado.clave == "error"
+    assert "preguntas" in estado.detalle
+
+
+def test_worker_encola_actualizacion_y_no_ejecuta_tk_directamente():
+    llamadas = []
+    app = SimpleNamespace(
+        _cerrando=False,
+        _hilo_ui=threading.get_ident(),
+        _cola_ui=queue.SimpleQueue(),
+    )
+
+    hilo = threading.Thread(
+        target=lambda: AsistenteClasesApp._enviar_ui(
+            app, llamadas.append, "actualizado"
+        )
+    )
+    hilo.start()
+    hilo.join(timeout=2)
+
+    assert llamadas == []
+    callback, args = app._cola_ui.get_nowait()
+    callback(*args)
+    assert llamadas == ["actualizado"]
+
+
+def test_medidor_conserva_solo_el_ultimo_nivel_publicado():
+    app = SimpleNamespace(_nivel_audio_pendiente=None)
+
+    AsistenteClasesApp._publicar_nivel_audio(app, 0.15)
+    AsistenteClasesApp._publicar_nivel_audio(app, 0.72)
+
+    assert app._nivel_audio_pendiente == 0.72
+
+
+def test_markdown_se_muestra_sin_marcas_tecnicas():
+    fragmentos = preparar_material_para_lectura(
+        "# Shock\n\n## Idea central\n\n- **Hipoperfusión** tisular\n",
+        "Apuntes",
+    )
+    texto = "".join(fragmento for fragmento, _etiqueta in fragmentos)
+    etiquetas = [etiqueta for _fragmento, etiqueta in fragmentos]
+
+    assert "#" not in texto
+    assert "**" not in texto
+    assert "• Hipoperfusión tisular" in texto
+    assert "titulo1" in etiquetas
+    assert "titulo2" in etiquetas
+
+
+def test_tarjetas_tsv_se_convierten_en_pregunta_y_respuesta():
+    fragmentos = preparar_material_para_lectura(
+        "Frente\tDorso\tMinuto\n¿Qué es el shock?\tHipoperfusión tisular.\t03:12\n",
+        "Tarjetas",
+    )
+    texto = "".join(fragmento for fragmento, _etiqueta in fragmentos)
+
+    assert "Tarjeta 1" in texto
+    assert "¿Qué es el shock?" in texto
+    assert "Hipoperfusión tisular." in texto
+    assert "Referencia: 03:12" in texto

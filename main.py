@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -27,7 +28,9 @@ from interfaz_argos import (
     COLOR_TEXTO,
     COLOR_TEXTO_SUAVE,
     NavegacionArgos,
+    leer_estado_material_clase,
     leer_material_clase,
+    preparar_material_para_lectura,
     tarjeta,
     titulo_seccion,
 )
@@ -66,8 +69,17 @@ class AsistenteClasesApp(ctk.CTk):
         self._grabacion_pausada = False
         self._cerrando = False
         self._recuperacion_grabaciones_activa = False
+        self._hilo_ui = threading.get_ident()
+        self._cola_ui: queue.SimpleQueue[tuple[object, tuple]] = queue.SimpleQueue()
+        self._bucle_ui_after = None
+        self._nivel_audio_pendiente: float | None = None
+        self._nivel_audio_mostrado = 0.0
 
         self._crear_interfaz()
+        # Tk y CustomTkinter solo se actualizan desde el hilo principal. Los
+        # workers publican eventos en una cola que se vacía a ritmo limitado;
+        # así el callback de PortAudio no fuerza redibujados concurrentes.
+        self._bucle_ui_after = self.after(50, self._procesar_cola_ui)
         if self.biblioteca_medica.interrumpidos_recuperados:
             total = self.biblioteca_medica.interrumpidos_recuperados
             self.estado_documentos.configure(
@@ -531,6 +543,8 @@ class AsistenteClasesApp(ctk.CTk):
         )
         if clase.get("audio_disponible"):
             detalle += "  ·  Audio guardado"
+        estado_material = leer_estado_material_clase(clase["ruta"])
+        detalle += f"  ·  {estado_material.etiqueta}"
         ctk.CTkLabel(
             bloque,
             text=detalle,
@@ -643,6 +657,15 @@ class AsistenteClasesApp(ctk.CTk):
             anchor="w",
         )
         self.meta_detalle.pack(fill="x", padx=24, pady=(3, 12))
+        self.estado_material_detalle = ctk.CTkLabel(
+            self.tab_detalle,
+            text="",
+            text_color=COLOR_TEXTO_SUAVE,
+            anchor="w",
+            justify="left",
+            wraplength=820,
+        )
+        self.estado_material_detalle.pack(fill="x", padx=24, pady=(0, 10))
 
         fila_fuentes = ctk.CTkFrame(self.tab_detalle, fg_color="transparent")
         fila_fuentes.pack(fill="x", padx=24, pady=(0, 10))
@@ -664,6 +687,28 @@ class AsistenteClasesApp(ctk.CTk):
             command=self._vincular_fuentes_clase,
         )
         self.btn_vincular_fuentes.pack(side="right")
+        self.btn_abrir_word_detalle = ctk.CTkButton(
+            fila_fuentes,
+            text="Abrir apuntes Word",
+            width=145,
+            height=32,
+            fg_color="transparent",
+            border_width=1,
+            border_color=COLOR_BORDE,
+            state="disabled",
+        )
+        self.btn_abrir_word_detalle.pack(side="right", padx=8)
+        self.btn_copiar_detalle = ctk.CTkButton(
+            fila_fuentes,
+            text="Copiar sección",
+            width=115,
+            height=32,
+            fg_color="transparent",
+            border_width=1,
+            border_color=COLOR_BORDE,
+            command=self._copiar_seccion_detalle,
+        )
+        self.btn_copiar_detalle.pack(side="right")
 
         self.selector_detalle = ctk.CTkSegmentedButton(
             self.tab_detalle,
@@ -682,6 +727,28 @@ class AsistenteClasesApp(ctk.CTk):
             wrap="word",
         )
         self.texto_detalle.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        self.texto_detalle.tag_config(
+            "titulo1", foreground=COLOR_TEXTO, font=("Segoe UI", 20, "bold"), spacing1=12, spacing3=8
+        )
+        self.texto_detalle.tag_config(
+            "titulo2", foreground=COLOR_ACENTO, font=("Segoe UI", 16, "bold"), spacing1=12, spacing3=6
+        )
+        self.texto_detalle.tag_config(
+            "titulo3", foreground=COLOR_TEXTO, font=("Segoe UI", 14, "bold"), spacing1=8, spacing3=4
+        )
+        self.texto_detalle.tag_config(
+            "nota", foreground=COLOR_TEXTO_SUAVE, lmargin1=14, lmargin2=14, spacing3=5
+        )
+        self.texto_detalle.tag_config(
+            "tabla", foreground="#D8E4F5", background=COLOR_PANEL_SUAVE, lmargin1=8, lmargin2=8, spacing1=2, spacing3=2
+        )
+        self.texto_detalle.tag_config(
+            "lista", foreground=COLOR_TEXTO, lmargin1=12, lmargin2=26, spacing3=3
+        )
+        self.texto_detalle.tag_config(
+            "pregunta", foreground=COLOR_ALERTA, font=("Segoe UI", 13, "bold"), spacing3=4
+        )
+        self._contenido_detalle_actual = ""
         self._ruta_detalle = None
 
     def _abrir_clase_en_argos(self, ruta):
@@ -701,6 +768,19 @@ class AsistenteClasesApp(ctk.CTk):
             meta += f"  ·  Clase {int(ficha['numero']):03d}"
         if fecha:
             meta += f"  ·  {fecha}"
+        estado_material = leer_estado_material_clase(carpeta)
+        colores_estado = {
+            "listo": COLOR_EXITO,
+            "procesando": COLOR_ALERTA,
+            "error": COLOR_PELIGRO,
+            "incompleto": COLOR_PELIGRO,
+        }
+        self.estado_material_detalle.configure(
+            text=f"{estado_material.etiqueta} · {estado_material.detalle}",
+            text_color=colores_estado.get(
+                estado_material.clave, COLOR_TEXTO_SUAVE
+            ),
+        )
         vinculados = ficha.get("documentos_vinculados", [])
         total_vinculados = len(vinculados) if isinstance(vinculados, list) else 0
         self.fuentes_detalle.configure(
@@ -729,6 +809,15 @@ class AsistenteClasesApp(ctk.CTk):
             )
         else:
             self.btn_reproducir_audio_detalle.configure(
+                state="disabled", command=lambda: None
+            )
+        word = carpeta / "apuntes_argos.docx"
+        if word.is_file():
+            self.btn_abrir_word_detalle.configure(
+                state="normal", command=lambda r=word: os.startfile(r)
+            )
+        else:
+            self.btn_abrir_word_detalle.configure(
                 state="disabled", command=lambda: None
             )
         self.meta_detalle.configure(text=meta)
@@ -813,10 +902,22 @@ class AsistenteClasesApp(ctk.CTk):
         if not self._ruta_detalle:
             return
         _archivo, contenido = leer_material_clase(self._ruta_detalle, seccion)
+        self._contenido_detalle_actual = contenido
         self.texto_detalle.configure(state="normal")
         self.texto_detalle.delete("1.0", "end")
-        self.texto_detalle.insert("end", contenido)
+        for texto, etiqueta in preparar_material_para_lectura(contenido, seccion):
+            if texto:
+                self.texto_detalle.insert("end", texto, etiqueta)
         self.texto_detalle.configure(state="disabled")
+
+    def _copiar_seccion_detalle(self):
+        contenido = self._contenido_detalle_actual.strip()
+        if not contenido:
+            self.estado.configure(text="No hay contenido que copiar en esta sección.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(contenido)
+        self.estado.configure(text="Sección copiada al portapapeles.")
 
     def _reprocesar_clase_detalle(self):
         if not self._ruta_detalle:
@@ -1016,8 +1117,7 @@ class AsistenteClasesApp(ctk.CTk):
                 try:
                     self.biblioteca_medica.procesar_documento(
                         item_id,
-                        lambda msg, p, pos=posicion: self.after(
-                            0,
+                        lambda msg, p, pos=posicion: self._enviar_ui(
                             self._actualizar_progreso_documentos,
                             msg,
                             ((pos - 1) + p) / total,
@@ -1025,9 +1125,8 @@ class AsistenteClasesApp(ctk.CTk):
                     )
                 except Exception as exc:
                     errores_extraccion.append(str(exc))
-            self.after(0, self._refrescar_documentos)
-            self.after(
-                0,
+            self._enviar_ui(self._refrescar_documentos)
+            self._enviar_ui(
                 self._fin_importacion_documentos,
                 mensaje,
                 errores_extraccion,
@@ -1050,27 +1149,43 @@ class AsistenteClasesApp(ctk.CTk):
             try:
                 self.biblioteca_medica.procesar_documento(
                     item_id,
-                    lambda msg, p: self.after(0, self._actualizar_progreso_documentos, msg, p)
+                    lambda msg, p: self._enviar_ui(
+                        self._actualizar_progreso_documentos, msg, p
+                    )
                 )
-                self.after(0, self._refrescar_documentos)
+                self._enviar_ui(self._refrescar_documentos)
             except Exception as exc:
-                self.after(0, messagebox.showerror, "Extracción documental", str(exc))
+                self._enviar_ui(
+                    messagebox.showerror, "Extracción documental", str(exc)
+                )
             finally:
-                self.after(0, self._actualizar_progreso_documentos, "Finalizado", 0)
+                self._enviar_ui(
+                    self._actualizar_progreso_documentos, "Finalizado", 0
+                )
         threading.Thread(target=worker, daemon=True).start()
 
     def _procesar_documentos_pendientes(self):
         def worker():
             try:
                 self.biblioteca_medica.procesar_pendientes(
-                    lambda msg, p: self.after(0, self._actualizar_progreso_documentos, msg, p)
+                    lambda msg, p: self._enviar_ui(
+                        self._actualizar_progreso_documentos, msg, p
+                    )
                 )
-                self.after(0, self._refrescar_documentos)
-                self.after(0, messagebox.showinfo, "Biblioteca médica", "Extracción de texto completada.")
+                self._enviar_ui(self._refrescar_documentos)
+                self._enviar_ui(
+                    messagebox.showinfo,
+                    "Biblioteca médica",
+                    "Extracción de texto completada.",
+                )
             except Exception as exc:
-                self.after(0, messagebox.showerror, "Extracción documental", str(exc))
+                self._enviar_ui(
+                    messagebox.showerror, "Extracción documental", str(exc)
+                )
             finally:
-                self.after(0, self._actualizar_progreso_documentos, "Finalizado", 0)
+                self._enviar_ui(
+                    self._actualizar_progreso_documentos, "Finalizado", 0
+                )
         threading.Thread(target=worker, daemon=True).start()
 
     def _actualizar_progreso_documentos(self, mensaje, valor):
@@ -1222,7 +1337,9 @@ class AsistenteClasesApp(ctk.CTk):
         self.btn_probar_microfono.configure(state="disabled", text="Escuchando…")
         self.btn_actualizar_microfonos.configure(state="disabled")
         self.selector_microfono.configure(state="disabled")
+        self._nivel_audio_pendiente = None
         self.nivel.set(0)
+        self._nivel_audio_mostrado = 0.0
         self.etiqueta_nivel.configure(text="Señal: 0 %")
         self.etiqueta_micro.configure(
             text="Habla ahora durante unos segundos…",
@@ -1234,9 +1351,7 @@ class AsistenteClasesApp(ctk.CTk):
                 nivel = GrabadorAudio.medir_senal(
                     dispositivo,
                     duracion=4.0,
-                    callback_nivel=lambda valor: self._enviar_ui(
-                        self._actualizar_nivel_audio, valor
-                    ),
+                    callback_nivel=self._publicar_nivel_audio,
                 )
                 self._enviar_ui(
                     self._fin_prueba_microfono, dispositivo, nivel, None
@@ -1385,7 +1500,7 @@ class AsistenteClasesApp(ctk.CTk):
         )
         self.grabador = GrabadorAudio(dispositivo.sample_rate, dispositivo.indice)
         ok = self.grabador.iniciar(
-            lambda n: self._enviar_ui(self._actualizar_nivel_audio, n),
+            self._publicar_nivel_audio,
             str(carpeta / "audio.wav"),
             str(carpeta / "fragmentos_audio"),
             lambda fragmento: self._transcripcion_incremental.encolar(fragmento),
@@ -1429,6 +1544,8 @@ class AsistenteClasesApp(ctk.CTk):
         self._grabando_desde = time.time()
         self._deteniendo_grabacion = False
         self._grabacion_pausada = False
+        self._nivel_audio_pendiente = None
+        self._nivel_audio_mostrado = 0.0
         self.texto_grabar.delete("1.0", "end")
         self.texto_grabar.insert(
             "end",
@@ -1450,9 +1567,18 @@ class AsistenteClasesApp(ctk.CTk):
         self._actualizar_reloj()
 
     def _actualizar_nivel_audio(self, nivel: float) -> None:
+        nivel = max(0.0, min(1.0, float(nivel)))
         self.nivel.set(nivel)
+        self._nivel_audio_mostrado = nivel
         if hasattr(self, "etiqueta_nivel"):
             self.etiqueta_nivel.configure(text=f"Señal: {nivel * 100:.1f} %")
+
+    def _publicar_nivel_audio(self, nivel: float) -> None:
+        """Conserva solo la lectura más reciente sin tocar Tk desde PortAudio."""
+        try:
+            self._nivel_audio_pendiente = max(0.0, min(1.0, float(nivel)))
+        except (TypeError, ValueError):
+            return
 
     def _actualizar_dispositivo_grabacion(self, entrada, motivo: str) -> None:
         self._dispositivo_entrada = entrada
@@ -1543,7 +1669,9 @@ class AsistenteClasesApp(ctk.CTk):
             self.btn_pausar.configure(text="Reanudar")
             self.btn_otra_entrada.configure(state="disabled")
             self.selector_microfono.configure(state="disabled")
+            self._nivel_audio_pendiente = None
             self.nivel.set(0)
+            self._nivel_audio_mostrado = 0.0
             self.etiqueta_nivel.configure(text="Señal: en pausa")
             self.estado_grabacion_global.configure(
                 text="Ⅱ  En pausa", text_color=COLOR_ALERTA
@@ -1608,14 +1736,44 @@ class AsistenteClasesApp(ctk.CTk):
             )
         self.after(1000, self._actualizar_reloj)
 
+    def _procesar_cola_ui(self) -> None:
+        """Aplica eventos de workers sin permitir llamadas concurrentes a Tk."""
+        if self._cerrando:
+            return
+        procesados = 0
+        while procesados < 64:
+            try:
+                callback, args = self._cola_ui.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback(*args)
+            except Exception as exc:
+                # Un evento visual fallido no debe detener los siguientes ni
+                # bloquear el cierre seguro de una grabación.
+                print(f"Error al actualizar la interfaz: {exc}")
+            procesados += 1
+
+        nivel = self._nivel_audio_pendiente
+        self._nivel_audio_pendiente = None
+        if nivel is not None and (
+            nivel == 0.0
+            or abs(nivel - self._nivel_audio_mostrado) >= 0.003
+        ):
+            self._actualizar_nivel_audio(nivel)
+
+        try:
+            self._bucle_ui_after = self.after(50, self._procesar_cola_ui)
+        except Exception:
+            self._bucle_ui_after = None
+
     def _enviar_ui(self, callback, *args) -> None:
         if self._cerrando:
             return
-        try:
-            self.after(0, callback, *args)
-        except Exception:
-            # La ventana puede desaparecer entre la comprobación y ``after``.
-            pass
+        if threading.get_ident() == self._hilo_ui:
+            callback(*args)
+            return
+        self._cola_ui.put((callback, args))
 
     def _detener_grabacion(self):
         if self._deteniendo_grabacion:
@@ -1725,7 +1883,9 @@ class AsistenteClasesApp(ctk.CTk):
             text="●  Sin grabación", text_color=COLOR_TEXTO_SUAVE
         )
         self.reloj.configure(text="00:00:00")
+        self._nivel_audio_pendiente = None
         self.nivel.set(0)
+        self._nivel_audio_mostrado = 0.0
         if hasattr(self, "etiqueta_nivel"):
             self.etiqueta_nivel.configure(text="Señal: 0 %")
         self._deteniendo_grabacion = False
@@ -1789,7 +1949,7 @@ class AsistenteClasesApp(ctk.CTk):
             self.estado.configure(text="Preparando el archivo para transcribir…")
 
         def callback_media(msg, progreso):
-            self.after(0, self._progreso, barra, msg, progreso)
+            self._enviar_ui(self._progreso, barra, msg, progreso)
 
         def worker():
             temporal = False
@@ -1799,7 +1959,9 @@ class AsistenteClasesApp(ctk.CTk):
                 ruta_procesable, temporal, tipo_original = preparar_para_transcripcion(ruta, callback_media)
                 segmentos = self.transcriptor.transcribir_archivo(
                     ruta_procesable,
-                    callback_progreso=lambda msg, p: self.after(0, self._progreso, barra, msg, max(0.08, p)),
+                    callback_progreso=lambda msg, p: self._enviar_ui(
+                        self._progreso, barra, msg, max(0.08, p)
+                    ),
                     min_hablantes=self.config_obj.min_hablantes,
                     max_hablantes=self.config_obj.max_hablantes,
                 )
@@ -1810,19 +1972,21 @@ class AsistenteClasesApp(ctk.CTk):
                 carpeta = self.repositorio.guardar_clase(materia, titulo, segmentos, fuente_archivable)
                 self.config_obj.ultima_materia = materia
                 self.config_obj.guardar()
-                self.after(0, self._mostrar_resultados, caja, segmentos, carpeta)
+                self._enviar_ui(
+                    self._mostrar_resultados, caja, segmentos, carpeta
+                )
             except Exception as exc:
-                self.after(0, messagebox.showerror, "Transcripción", str(exc))
-                self.after(0, barra.set, 0)
+                self._enviar_ui(messagebox.showerror, "Transcripción", str(exc))
+                self._enviar_ui(barra.set, 0)
             finally:
                 if temporal:
                     eliminar_temporal(ruta_procesable)
                 if tab == "archivo":
-                    self.after(
-                        0, self.btn_seleccionar_archivo.configure, {"state": "normal"}
+                    self._enviar_ui(
+                        self.btn_seleccionar_archivo.configure, {"state": "normal"}
                     )
-                    self.after(
-                        0, self.btn_transcribir_archivo.configure, {"state": "normal"}
+                    self._enviar_ui(
+                        self.btn_transcribir_archivo.configure, {"state": "normal"}
                     )
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1874,18 +2038,31 @@ class AsistenteClasesApp(ctk.CTk):
                     self.config_obj.hf_token, self.config_obj.whisper_model,
                     self.config_obj.usar_gpu, self.config_obj.idioma
                 )
-                motor.cargar_modelos(lambda msg, p: self.after(0, self.estado.configure, {"text": msg}))
+                motor.cargar_modelos(
+                    lambda msg, p: self._enviar_ui(
+                        self.estado.configure, {"text": msg}
+                    )
+                )
                 self.transcriptor = motor
                 texto = f"Listo · {motor.dispositivo_real.upper()}" + (
                     " · diarización" if motor.diarizacion_disponible else ""
                 )
-                self.after(0, self.estado_modelos.configure, {"text": texto, "text_color": "#4caf50"})
-                self.after(0, self.estado.configure, {"text": "Listo para grabar o transcribir."})
-                self.after(0, self._recuperar_grabaciones_interrumpidas)
+                self._enviar_ui(
+                    self.estado_modelos.configure,
+                    {"text": texto, "text_color": "#4caf50"},
+                )
+                self._enviar_ui(
+                    self.estado.configure,
+                    {"text": "Listo para grabar o transcribir."},
+                )
+                self._enviar_ui(self._recuperar_grabaciones_interrumpidas)
                 self._registrar_resultado_modelos(True, texto)
             except Exception as exc:
-                self.after(0, self.estado_modelos.configure, {"text": "Error", "text_color": "#ef5350"})
-                self.after(0, self.estado.configure, {"text": str(exc)})
+                self._enviar_ui(
+                    self.estado_modelos.configure,
+                    {"text": "Error", "text_color": "#ef5350"},
+                )
+                self._enviar_ui(self.estado.configure, {"text": str(exc)})
                 self._registrar_resultado_modelos(False, str(exc))
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1998,6 +2175,12 @@ class AsistenteClasesApp(ctk.CTk):
 
     def _cerrar(self):
         self._cerrando = True
+        if self._bucle_ui_after is not None:
+            try:
+                self.after_cancel(self._bucle_ui_after)
+            except Exception:
+                pass
+            self._bucle_ui_after = None
         if self.grabador and self.grabador.esta_grabando():
             if self._carpeta_grabacion:
                 self.repositorio.marcar_estado_grabacion(

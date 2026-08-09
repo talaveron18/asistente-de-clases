@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import csv
+import io
+import json
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import customtkinter as ctk
@@ -33,6 +38,92 @@ MATERIALES_CLASE = {
     "Tarjetas": ("flashcards_argos.tsv",),
 }
 
+ARCHIVOS_MATERIAL_COMPLETO = (
+    "apuntes_estudio_argos.md",
+    "preguntas_repaso.md",
+    "flashcards_argos.tsv",
+    "repaso_rapido.md",
+)
+
+
+@dataclass(frozen=True)
+class EstadoMaterialClase:
+    clave: str
+    etiqueta: str
+    detalle: str
+
+
+def leer_estado_material_clase(carpeta: str | Path) -> EstadoMaterialClase:
+    """Resume el estado persistente sin confundir archivos parciales con éxito."""
+    carpeta = Path(carpeta)
+    estado = {}
+    try:
+        estado = json.loads(
+            (carpeta / "estado_argos.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    clave = estado.get("estado")
+    if clave == "procesando":
+        pasos = estado.get("pasos") or []
+        paso = next(
+            (
+                str(item.get("nombre", ""))
+                for item in reversed(pasos)
+                if item.get("estado") == "procesando"
+            ),
+            "",
+        )
+        detalle = f"Paso actual: {paso.replace('_', ' ')}." if paso else "Procesamiento en curso."
+        return EstadoMaterialClase("procesando", "Procesando material", detalle)
+    if clave == "error":
+        error = estado.get("error") or {}
+        return EstadoMaterialClase(
+            "error",
+            "Requiere revisión",
+            str(error.get("mensaje") or "El procesamiento no terminó."),
+        )
+
+    completos = all((carpeta / nombre).is_file() for nombre in ARCHIVOS_MATERIAL_COMPLETO)
+    if completos:
+        return EstadoMaterialClase(
+            "listo",
+            "Material listo",
+            "Apuntes, repaso, preguntas y tarjetas disponibles.",
+        )
+    if clave == "completado":
+        return EstadoMaterialClase(
+            "incompleto",
+            "Material incompleto",
+            "El proceso terminó, pero falta algún archivo obligatorio.",
+        )
+
+    transcripcion = carpeta / "transcripcion.txt"
+    try:
+        tiene_texto = transcripcion.is_file() and bool(
+            transcripcion.read_text(encoding="utf-8", errors="replace").strip()
+        )
+    except OSError:
+        tiene_texto = False
+    if tiene_texto:
+        return EstadoMaterialClase(
+            "pendiente",
+            "Pendiente de procesar",
+            "La transcripción está guardada y aún no tiene todo el material.",
+        )
+    if any(carpeta.glob("audio.*")):
+        return EstadoMaterialClase(
+            "transcribiendo",
+            "Audio guardado",
+            "La transcripción todavía no está disponible.",
+        )
+    return EstadoMaterialClase(
+        "pendiente",
+        "Clase pendiente",
+        "Todavía no hay material de estudio disponible.",
+    )
+
 
 def leer_material_clase(carpeta: str | Path, seccion: str) -> tuple[Path | None, str]:
     """Devuelve el material más elaborado disponible para una ficha de clase."""
@@ -49,6 +140,70 @@ def leer_material_clase(carpeta: str | Path, seccion: str) -> tuple[Path | None,
         "Este material aún no está disponible. "
         "Pulsa «Actualizar material» para generarlo."
     )
+
+
+def preparar_material_para_lectura(
+    contenido: str, seccion: str
+) -> list[tuple[str, str]]:
+    """Convierte Markdown/TSV técnico en fragmentos legibles para la ficha."""
+    if seccion == "Transcripción":
+        return [(contenido, "cuerpo")]
+    if seccion == "Tarjetas":
+        return _preparar_tarjetas(contenido)
+
+    fragmentos: list[tuple[str, str]] = []
+    for linea in contenido.splitlines():
+        limpia = linea.strip()
+        if re.fullmatch(r"\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?", limpia):
+            continue
+        if limpia.startswith("### "):
+            fragmentos.append((_limpiar_markdown(limpia[4:]) + "\n", "titulo3"))
+        elif limpia.startswith("## "):
+            fragmentos.append((_limpiar_markdown(limpia[3:]) + "\n", "titulo2"))
+        elif limpia.startswith("# "):
+            fragmentos.append((_limpiar_markdown(limpia[2:]) + "\n", "titulo1"))
+        elif limpia.startswith("> "):
+            fragmentos.append((_limpiar_markdown(limpia[2:]) + "\n", "nota"))
+        elif limpia.startswith("|") and limpia.endswith("|"):
+            celdas = [
+                _limpiar_markdown(celda.strip())
+                for celda in limpia.strip("|").split("|")
+            ]
+            fragmentos.append(("  ·  ".join(celdas) + "\n", "tabla"))
+        elif re.match(r"^[-*]\s+", limpia):
+            fragmentos.append(("• " + _limpiar_markdown(limpia[2:]) + "\n", "lista"))
+        elif limpia:
+            fragmentos.append((_limpiar_markdown(linea) + "\n", "cuerpo"))
+        else:
+            fragmentos.append(("\n", "cuerpo"))
+    return fragmentos or [(contenido, "cuerpo")]
+
+
+def _limpiar_markdown(texto: str) -> str:
+    texto = re.sub(r"\*\*(.+?)\*\*", r"\1", texto)
+    texto = re.sub(r"`(.+?)`", r"\1", texto)
+    return texto.replace("\\|", "|").strip()
+
+
+def _preparar_tarjetas(contenido: str) -> list[tuple[str, str]]:
+    filas = list(csv.reader(io.StringIO(contenido), delimiter="\t"))
+    if filas and [x.casefold() for x in filas[0][:2]] == ["frente", "dorso"]:
+        filas = filas[1:]
+    fragmentos: list[tuple[str, str]] = []
+    for numero, fila in enumerate(filas, 1):
+        if len(fila) < 2:
+            continue
+        minuto = fila[2].strip() if len(fila) > 2 else ""
+        fragmentos.extend(
+            [
+                (f"Tarjeta {numero}\n", "titulo3"),
+                (fila[0].strip() + "\n", "pregunta"),
+                (fila[1].strip() + "\n", "cuerpo"),
+                ((f"Referencia: {minuto}\n" if minuto else ""), "nota"),
+                ("\n", "cuerpo"),
+            ]
+        )
+    return fragmentos or [("No hay tarjetas disponibles.\n", "cuerpo")]
 
 
 class NavegacionArgos(ctk.CTkFrame):

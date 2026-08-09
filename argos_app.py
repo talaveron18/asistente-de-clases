@@ -40,6 +40,7 @@ class ArgosApp(AsistenteClasesApp):
         self._rutas_pendientes: set[str] = set()
         self._pipeline_activo = False
         self._indice_pendiente = False
+        self._ruta_pipeline_activa: str | None = None
 
         self.tab_pipeline = self.tabs.add("Procesar clase")
         self.tab_chat = self.tabs.add("Chat ARGOS")
@@ -119,54 +120,55 @@ class ArgosApp(AsistenteClasesApp):
             ruta = trabajo["ruta"]
             automatico = bool(trabajo["automatico"])
             self._pipeline_activo = True
-            self.after(0, self._inicio_pipeline_ui, ruta)
+            self._enviar_ui(self._inicio_pipeline_ui, ruta)
             try:
                 resultado = self.orquestador.procesar_clase(
                     ruta,
-                    callback=lambda mensaje, progreso: self.after(
-                        0,
+                    callback=lambda mensaje, progreso: self._enviar_ui(
                         self._actualizar_progreso_pipeline,
                         mensaje,
                         progreso,
                     ),
                 )
-                self.after(
-                    0,
+                self._enviar_ui(
                     self._pipeline_completado,
                     ruta,
                     resultado,
                     automatico,
                 )
             except ClaseEnProcesoError as exc:
-                self.after(0, self._pipeline_error, ruta, str(exc), automatico)
+                self._enviar_ui(
+                    self._pipeline_error, ruta, str(exc), automatico
+                )
             except Exception as exc:
-                self.after(0, self._pipeline_error, ruta, str(exc), automatico)
+                self._enviar_ui(
+                    self._pipeline_error, ruta, str(exc), automatico
+                )
             finally:
                 self._rutas_pendientes.discard(ruta)
                 self._pipeline_activo = False
                 self._cola_pipeline.task_done()
-                self.after(0, self._fin_pipeline_ui)
+                self._enviar_ui(self._fin_pipeline_ui)
 
     def _consumir_reconstruccion_indice(self):
         self._pipeline_activo = True
-        self.after(0, self._inicio_indice_ui)
+        self._enviar_ui(self._inicio_indice_ui)
         try:
             stats = self.indice_fts.reconstruir(
-                callback=lambda mensaje, progreso: self.after(
-                    0,
+                callback=lambda mensaje, progreso: self._enviar_ui(
                     self._actualizar_progreso_indice,
                     mensaje,
                     progreso,
                 )
             )
-            self.after(0, self._indice_completado, stats)
+            self._enviar_ui(self._indice_completado, stats)
         except Exception as exc:
-            self.after(0, self._indice_error, str(exc))
+            self._enviar_ui(self._indice_error, str(exc))
         finally:
             self._indice_pendiente = False
             self._pipeline_activo = False
             self._cola_pipeline.task_done()
-            self.after(0, self._fin_pipeline_ui)
+            self._enviar_ui(self._fin_pipeline_ui)
 
     def _inicio_indice_ui(self):
         self.btn_reprocesar.configure(state="disabled")
@@ -192,20 +194,35 @@ class ArgosApp(AsistenteClasesApp):
         messagebox.showerror("Índice ARGOS", error)
 
     def _inicio_pipeline_ui(self, ruta: str):
+        self._ruta_pipeline_activa = str(Path(ruta).resolve())
         self.btn_reprocesar.configure(state="disabled")
         self.progreso_pipeline.set(0)
         self.estado_pipeline.configure(text=f"Procesando: {Path(ruta).name}")
         self.estado.configure(text="ARGOS está procesando una clase...")
+        self._refrescar_clases()
+        self._refrescar_detalle_si_coincide(ruta, conservar_seccion=True)
 
     def _actualizar_progreso_pipeline(self, mensaje: str, progreso: float):
         self.estado_pipeline.configure(text=mensaje)
         self.estado.configure(text=mensaje)
         self.progreso_pipeline.set(max(0.0, min(1.0, progreso)))
+        if (
+            self._ruta_detalle
+            and self._ruta_pipeline_activa
+            and Path(self._ruta_detalle).resolve()
+            == Path(self._ruta_pipeline_activa)
+        ):
+            porcentaje = round(max(0.0, min(1.0, progreso)) * 100)
+            self.estado_material_detalle.configure(
+                text=f"Procesando material · {mensaje} ({porcentaje} %)",
+                text_color="#F5B942",
+            )
 
     def _fin_pipeline_ui(self):
         self.btn_reprocesar.configure(state="normal")
         if self._cola_pipeline.empty():
             self.progreso_pipeline.set(0)
+        self._ruta_pipeline_activa = None
 
     def _pipeline_completado(
         self,
@@ -219,6 +236,8 @@ class ArgosApp(AsistenteClasesApp):
         self._actualizar_estado_indice()
         self._actualizar_selector_pipeline()
         self._mostrar_resumen_pipeline(ruta, resultado)
+        self._refrescar_clases()
+        self._refrescar_detalle_si_coincide(ruta, conservar_seccion=True)
         titulo = "Clase procesada" if automatico else "Reprocesamiento completado"
         messagebox.showinfo(
             "ARGOS",
@@ -239,12 +258,29 @@ class ArgosApp(AsistenteClasesApp):
         self.estado.configure(
             text=f"Clase guardada; procesamiento incompleto: {error}"
         )
+        self._refrescar_clases()
+        self._refrescar_detalle_si_coincide(ruta, conservar_seccion=True)
         messagebox.showerror(
             "ARGOS",
             "La transcripción está guardada, pero el procesamiento falló.\n\n"
             f"Clase: {ruta}\n\nError: {error}\n\n"
             "Puedes volver a intentarlo desde «Estado y procesos».",
         )
+
+    def _refrescar_detalle_si_coincide(
+        self, ruta: str | Path, conservar_seccion: bool = True
+    ) -> None:
+        if not self._ruta_detalle:
+            return
+        if Path(self._ruta_detalle).resolve() != Path(ruta).resolve():
+            return
+        if self.tabs.get() != "Detalle de clase":
+            return
+        seccion = self.selector_detalle.get() if conservar_seccion else "Resumen"
+        self._abrir_clase_en_argos(ruta)
+        if conservar_seccion and seccion:
+            self.selector_detalle.set(seccion)
+            self._mostrar_seccion_detalle(seccion)
 
     def _crear_tab_pipeline(self):
         titulo_seccion(
@@ -472,17 +508,18 @@ class ArgosApp(AsistenteClasesApp):
         for widget in self.fuentes_chat.winfo_children():
             widget.destroy()
         self.estado_chat.configure(text="Consultando tu memoria local…")
+        alcance = self.alcance_chat.get()
 
         def worker():
             try:
                 respuesta = self.chat_argos.preguntar(
                     pregunta,
-                    alcance=self.alcance_chat.get(),
+                    alcance=alcance,
                     limite_fuentes=10,
                 )
-                self.after(0, self._mostrar_respuesta, respuesta)
+                self._enviar_ui(self._mostrar_respuesta, respuesta)
             except Exception as exc:
-                self.after(0, messagebox.showerror, "Chat ARGOS", str(exc))
+                self._enviar_ui(messagebox.showerror, "Chat ARGOS", str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 

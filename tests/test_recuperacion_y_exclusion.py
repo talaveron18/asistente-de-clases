@@ -228,6 +228,23 @@ def test_reconstruccion_manual_entra_en_la_misma_cola():
     assert "cola" in app.estado_chat.texto.lower()
 
 
+def test_pipeline_no_fuerza_volver_a_detalle_si_usuario_cambio_de_pantalla(
+    tmp_path,
+):
+    clase = _crear_clase(tmp_path / "Asistente de Clases")
+    aperturas = []
+    app = object.__new__(argos_app.ArgosApp)
+    app._ruta_detalle = clase
+    app.tabs = type(
+        "TabsFalsas", (), {"get": lambda self: "Mis clases"}
+    )()
+    app._abrir_clase_en_argos = aperturas.append
+
+    argos_app.ArgosApp._refrescar_detalle_si_coincide(app, clase)
+
+    assert aperturas == []
+
+
 def test_main_no_es_un_punto_de_entrada_y_spec_usa_argos_app():
     raiz = Path(__file__).parents[1]
     arbol = ast.parse((raiz / "main.py").read_text(encoding="utf-8"))

@@ -139,6 +139,7 @@ def test_documento_importado_se_extrae_sin_segundo_boton(monkeypatch):
         estado_documentos=types.SimpleNamespace(configure=lambda **_kwargs: None),
         _actualizar_progreso_documentos=lambda *_args: None,
         _fin_importacion_documentos=lambda *_args: None,
+        _enviar_ui=lambda callback, *args: callback(*args),
         after=lambda _ms, callback, *args: callback(*args),
     )
 
