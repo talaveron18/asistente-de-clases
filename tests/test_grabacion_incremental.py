@@ -156,6 +156,98 @@ def test_hardware_prefiere_wasapi_al_clon_mme_predeterminado(monkeypatch):
     ]
 
 
+def test_hardware_deja_asus_ai_noise_detras_del_microfono_fisico(monkeypatch):
+    class Predeterminado:
+        device = (0, 9)
+
+    class SoundDeviceFalso:
+        default = Predeterminado()
+
+        @staticmethod
+        def query_devices():
+            return [
+                {
+                    "name": "AI Noise-cancelling Input (ASUS)",
+                    "max_input_channels": 2,
+                    "default_samplerate": 44100,
+                    "hostapi": 0,
+                },
+                {
+                    "name": "Micrófono (Realtek(R) Audio)",
+                    "max_input_channels": 2,
+                    "default_samplerate": 48000,
+                    "hostapi": 1,
+                },
+            ]
+
+        @staticmethod
+        def query_hostapis():
+            return [
+                {"name": "Windows WASAPI", "default_input_device": 0},
+                {"name": "MME", "default_input_device": 1},
+            ]
+
+        @staticmethod
+        def check_input_settings(**_kwargs):
+            return None
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+
+    dispositivos = GrabadorAudio.detectar_dispositivos_entrada(16000, 0)
+
+    assert [entrada.nombre for entrada in dispositivos] == [
+        "Micrófono (Realtek(R) Audio)",
+        "AI Noise-cancelling Input (ASUS)",
+    ]
+
+
+def test_hardware_no_recorta_el_microfono_real_despues_de_doce_rutas(monkeypatch):
+    class Predeterminado:
+        device = (0, 9)
+
+    virtuales = [
+        {
+            "name": f"AI Noise-cancelling Input (ASUS) {indice}",
+            "max_input_channels": 2,
+            "default_samplerate": 44100,
+            "hostapi": 0,
+        }
+        for indice in range(13)
+    ]
+
+    class SoundDeviceFalso:
+        default = Predeterminado()
+
+        @staticmethod
+        def query_devices():
+            return virtuales + [
+                {
+                    "name": "Micrófono (Realtek(R) Audio)",
+                    "max_input_channels": 2,
+                    "default_samplerate": 48000,
+                    "hostapi": 1,
+                }
+            ]
+
+        @staticmethod
+        def query_hostapis():
+            return [
+                {"name": "Windows WASAPI", "default_input_device": 0},
+                {"name": "MME", "default_input_device": 13},
+            ]
+
+        @staticmethod
+        def check_input_settings(**_kwargs):
+            return None
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+
+    dispositivos = GrabadorAudio.detectar_dispositivos_entrada(16000)
+
+    assert len(dispositivos) == 14
+    assert dispositivos[0].nombre == "Micrófono (Realtek(R) Audio)"
+
+
 def test_hardware_excluye_mezcla_estereo_aunque_tenga_senal_y_host_preferido(
     monkeypatch,
 ):
@@ -449,6 +541,43 @@ def test_grabador_cambia_automaticamente_si_la_primera_ruta_esta_muda(
     assert grabador.dispositivo == 2
     assert (2, "cambio_automatico") in cambios
     assert grabador.nivel_maximo > 0.002
+
+
+def test_cambio_manual_reinicia_la_lista_despues_de_agotarla():
+    aperturas = []
+
+    class StreamFalso:
+        def __init__(self, device, **_kwargs):
+            aperturas.append(device)
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    class SoundDeviceFalso:
+        InputStream = StreamFalso
+
+    entradas = [
+        DispositivoEntrada(1, "Micrófono Realtek", 48000, 2, "WASAPI"),
+        DispositivoEntrada(2, "AI Noise-cancelling Input (ASUS)", 44100, 2, "MME"),
+    ]
+    grabador = GrabadorAudio(sample_rate=48000, dispositivo=2)
+    grabador.is_recording = True
+    grabador._sd = SoundDeviceFalso
+    grabador._candidatos_entrada = entradas
+    grabador._indice_candidato = len(entradas) - 1
+
+    assert grabador.probar_siguiente_entrada()
+
+    assert aperturas == [1]
+    assert grabador.dispositivo == 1
+    grabador.is_recording = False
+    grabador._cerrar_stream()
 
 
 def test_prueba_real_descarta_el_mejor_puntuado_si_esta_mudo(

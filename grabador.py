@@ -37,11 +37,48 @@ PATRONES_CAPTURA_SALIDA = (
     "voicemeeter output",
 )
 
+# Utilidades como ASUS AI Noise-Cancelling Input, NVIDIA Broadcast o los
+# cables virtuales se anuncian a Windows como micrófonos, aunque dependen de
+# otro servicio y pueden abrirse entregando silencio. No se excluyen por
+# completo porque algunos usuarios las usan de forma intencionada, pero deben
+# quedar siempre detrás de un micrófono físico compatible.
+PATRONES_ENTRADA_VIRTUAL = (
+    "ai noise-cancelling input",
+    "ai noise cancelling input",
+    "ai noise-canceling input",
+    "ai noise canceling input",
+    "nvidia broadcast",
+    "virtual microphone",
+    "virtual mic",
+    "micrófono virtual",
+    "microfono virtual",
+    "voicemeeter",
+    "vb-audio",
+    "cable input",
+)
+
+PATRONES_MICROFONO_FISICO = (
+    "micrófono",
+    "microfono",
+    "microphone",
+    "mic array",
+    "realtek",
+    "intel smart sound",
+    "usb audio",
+    "headset",
+)
+
 
 def es_captura_salida(nombre: str) -> bool:
     """Indica si una entrada de PortAudio es en realidad audio del sistema."""
     normalizado = (nombre or "").casefold()
     return any(patron in normalizado for patron in PATRONES_CAPTURA_SALIDA)
+
+
+def es_entrada_virtual(nombre: str) -> bool:
+    """Reconoce capas de procesado que no son el micrófono físico."""
+    normalizado = (nombre or "").casefold()
+    return any(patron in normalizado for patron in PATRONES_ENTRADA_VIRTUAL)
 
 
 def _sounddevice():
@@ -284,8 +321,16 @@ class GrabadorAudio:
             nombre_normalizado = nombre.casefold()
             if any(texto in nombre_normalizado for texto in genericos):
                 puntuacion -= 700
-            if "mic" in nombre_normalizado:
-                puntuacion += 50
+            if any(
+                texto in nombre_normalizado
+                for texto in PATRONES_MICROFONO_FISICO
+            ):
+                puntuacion += 600
+            if es_entrada_virtual(nombre):
+                # Una capa virtual puede ser el dispositivo predeterminado y
+                # tener una ruta WASAPI válida, pero eso no demuestra que su
+                # servicio esté activo ni que oiga la habitación.
+                puntuacion -= 2400
 
             try:
                 indice_host = int(datos.get("hostapi", -1))
@@ -353,7 +398,10 @@ class GrabadorAudio:
         # Las rutas pueden tener frecuencias nativas distintas. El capturador
         # las normaliza a la frecuencia única del WAV, así que deben conservarse
         # para que el failover sea real y no solo entre duplicados equivalentes.
-        return ordenados[:12]
+        # No se limita el número: equipos con Armoury Crate, HDMI, Bluetooth y
+        # varios host API pueden superar doce entradas antes de que PortAudio
+        # enumere el micrófono físico que sí entrega señal.
+        return ordenados
 
     @staticmethod
     def medir_senal(
@@ -753,12 +801,25 @@ class GrabadorAudio:
                 return
 
     def _cambiar_a_siguiente_entrada(
-        self, sd, callback_nivel, motivo: str
+        self,
+        sd,
+        callback_nivel,
+        motivo: str,
+        reiniciar_si_agotado: bool = False,
     ) -> bool:
         """Abre el siguiente candidato disponible, saltando rutas rotas."""
         if not self._cambio_entrada_lock.acquire(blocking=False):
             return True
         try:
+            if (
+                reiniciar_si_agotado
+                and self._indice_candidato + 1 >= len(self._candidatos_entrada)
+            ):
+                # El supervisor automático puede haber agotado la lista antes
+                # de que el usuario conceda permisos o active el micrófono.
+                # El botón manual debe volver a probar desde el principio, no
+                # quedar inservible hasta iniciar otra clase.
+                self._indice_candidato = -1
             while self.is_recording:
                 siguiente = self._indice_candidato + 1
                 if siguiente >= len(self._candidatos_entrada):
@@ -783,7 +844,10 @@ class GrabadorAudio:
         if not self.is_recording or self.is_paused or self._sd is None:
             return False
         return self._cambiar_a_siguiente_entrada(
-            self._sd, self._callback_nivel, "cambio_manual"
+            self._sd,
+            self._callback_nivel,
+            "cambio_manual",
+            reiniciar_si_agotado=True,
         )
 
     def _avisar_dispositivo(self, entrada: DispositivoEntrada, motivo: str) -> None:
