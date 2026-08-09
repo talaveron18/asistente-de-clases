@@ -191,6 +191,7 @@ class OrquestadorArgos:
                         len(b.get("referencias_locales", []))
                         for b in enriquecido.get("bloques", [])
                     ),
+                    "calidad": material.get("calidad", {}),
                     "indice": indice,
                     "archivo_fuente": datos.get("archivo_fuente"),
                 }

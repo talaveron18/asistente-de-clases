@@ -31,6 +31,8 @@ class PipelineClaseTests(unittest.TestCase):
             self.assertGreaterEqual(len(resultado["bloques"]), 2)
             self.assertEqual(len(resultado["avisos_examen"]), 1)
             self.assertEqual(len(resultado["preguntas_profesor"]), 1)
+            self.assertEqual(resultado["bloques"][0]["segmentos"][0]["tiempo"], "00:00")
+            self.assertEqual(resultado["bloques"][0]["segmentos"][1]["tiempo"], "02:10")
             self.assertTrue((carpeta / "transcripcion_limpia.txt").exists())
             self.assertTrue((carpeta / "pipeline_clase.json").exists())
             self.assertTrue((carpeta / "apuntes_argos.md").exists())

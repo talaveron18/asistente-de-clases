@@ -22,9 +22,10 @@ Audio o vídeo
 → Corrección médica conservadora
 → Selección de transcripción vigente
 → Limpieza y división temática
-→ Apuntes, Word, flashcards y preguntas
 → Actualización del índice SQLite FTS5
 → Referencias de la biblioteca local
+→ Apuntes, Word, flashcards y preguntas
+→ Auditoría de fuentes, minutos, páginas y respuestas
 ```
 
 Reglas:
@@ -114,6 +115,8 @@ También puede utilizarse `EJECUTAR.bat`.
 - Chat documental con referencias a página o minuto.
 - Apuntes Markdown y Word.
 - Flashcards TSV y preguntas de repaso.
+- Sección de fuentes con cobertura documental, minuto/página y auditoría de
+  respuestas explícitas frente a preguntas sin contestar.
 - Corrección médica mediante glosario explícito y registro de cambios.
 
 La diarización no forma parte del instalador básico: Pyannote, PyTorch y sus

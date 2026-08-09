@@ -712,7 +712,14 @@ class AsistenteClasesApp(ctk.CTk):
 
         self.selector_detalle = ctk.CTkSegmentedButton(
             self.tab_detalle,
-            values=["Resumen", "Apuntes", "Transcripción", "Preguntas", "Tarjetas"],
+            values=[
+                "Resumen",
+                "Apuntes",
+                "Transcripción",
+                "Preguntas",
+                "Tarjetas",
+                "Fuentes",
+            ],
             command=self._mostrar_seccion_detalle,
             selected_color=COLOR_ACENTO,
             selected_hover_color=COLOR_ACENTO,
@@ -2038,11 +2045,13 @@ class AsistenteClasesApp(ctk.CTk):
                     self.config_obj.hf_token, self.config_obj.whisper_model,
                     self.config_obj.usar_gpu, self.config_obj.idioma
                 )
-                motor.cargar_modelos(
-                    lambda msg, p: self._enviar_ui(
-                        self.estado.configure, {"text": msg}
+                def informar_carga(mensaje, progreso):
+                    self._enviar_ui(
+                        self.estado.configure, {"text": mensaje}
                     )
-                )
+                    self._registrar_progreso_modelos(mensaje, progreso)
+
+                motor.cargar_modelos(informar_carga)
                 self.transcriptor = motor
                 texto = f"Listo · {motor.dispositivo_real.upper()}" + (
                     " · diarización" if motor.diarizacion_disponible else ""
@@ -2153,20 +2162,39 @@ class AsistenteClasesApp(ctk.CTk):
         )
 
     @staticmethod
+    def _registrar_progreso_modelos(detalle: str, progreso: float) -> None:
+        """Deja diagnóstico de arranque para CI sin alterar la señal final."""
+        destino = os.environ.get("ARGOS_MODEL_STATUS_FILE", "").strip()
+        if not destino:
+            return
+        AsistenteClasesApp._escribir_estado_modelos(
+            Path(destino),
+            {
+                "estado": "cargando",
+                "progreso": max(0.0, min(1.0, float(progreso))),
+                "detalle": detalle,
+                "actualizado": time.time(),
+            },
+        )
+
+    @staticmethod
     def _registrar_resultado_modelos(exito: bool, detalle: str) -> None:
         """Expone al smoke test de Windows el resultado real de la carga."""
         destino = os.environ.get("ARGOS_READY_FILE", "").strip()
         if not destino:
             return
-        ruta = Path(destino)
+        AsistenteClasesApp._escribir_estado_modelos(
+            Path(destino),
+            {"modelos_cargados": exito, "detalle": detalle},
+        )
+
+    @staticmethod
+    def _escribir_estado_modelos(ruta: Path, datos: dict) -> None:
         temporal = ruta.with_suffix(ruta.suffix + ".tmp")
         try:
             ruta.parent.mkdir(parents=True, exist_ok=True)
             temporal.write_text(
-                json.dumps(
-                    {"modelos_cargados": exito, "detalle": detalle},
-                    ensure_ascii=False,
-                ),
+                json.dumps(datos, ensure_ascii=False),
                 encoding="utf-8",
             )
             temporal.replace(ruta)

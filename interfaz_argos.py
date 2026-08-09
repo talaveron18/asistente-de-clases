@@ -36,6 +36,7 @@ MATERIALES_CLASE = {
     ),
     "Preguntas": ("preguntas_repaso.md",),
     "Tarjetas": ("flashcards_argos.tsv",),
+    "Fuentes": ("trazabilidad_argos.md",),
 }
 
 ARCHIVOS_MATERIAL_COMPLETO = (
@@ -43,6 +44,8 @@ ARCHIVOS_MATERIAL_COMPLETO = (
     "preguntas_repaso.md",
     "flashcards_argos.tsv",
     "repaso_rapido.md",
+    "trazabilidad_argos.json",
+    "trazabilidad_argos.md",
 )
 
 
@@ -87,10 +90,27 @@ def leer_estado_material_clase(carpeta: str | Path) -> EstadoMaterialClase:
 
     completos = all((carpeta / nombre).is_file() for nombre in ARCHIVOS_MATERIAL_COMPLETO)
     if completos:
+        detalle = "Apuntes, repaso, preguntas, tarjetas y fuentes disponibles."
+        try:
+            trazabilidad = json.loads(
+                (carpeta / "trazabilidad_argos.json").read_text(encoding="utf-8")
+            )
+            metricas = trazabilidad.get("metricas", {})
+            cobertura = metricas.get("cobertura_documental_porcentaje")
+            contestadas = metricas.get("preguntas_con_respuesta_explicitada")
+            preguntas = metricas.get("preguntas")
+            if isinstance(cobertura, (int, float)):
+                detalle += f" Cobertura documental: {cobertura:g} %."
+            if isinstance(contestadas, int) and isinstance(preguntas, int):
+                detalle += (
+                    f" Respuestas explícitas localizadas: {contestadas} de {preguntas}."
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
         return EstadoMaterialClase(
             "listo",
             "Material listo",
-            "Apuntes, repaso, preguntas y tarjetas disponibles.",
+            detalle,
         )
     if clave == "completado":
         return EstadoMaterialClase(

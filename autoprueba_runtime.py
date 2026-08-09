@@ -27,6 +27,8 @@ ARCHIVOS_PIPELINE_OBLIGATORIOS = (
     "preguntas_repaso.md",
     "flashcards_argos.tsv",
     "repaso_rapido.md",
+    "trazabilidad_argos.json",
+    "trazabilidad_argos.md",
     "apuntes_argos.docx",
     "estado_argos.json",
 )
@@ -99,6 +101,15 @@ def probar_pipeline_completo(raiz: str | Path, documento: str | Path) -> dict:
         raise RuntimeError(
             "El pipeline empaquetado no vinculó la fuente médica de prueba."
         )
+    calidad = resultado.get("calidad", {})
+    if calidad.get("cobertura_documental_porcentaje", 0) <= 0:
+        raise RuntimeError(
+            "El pipeline empaquetado no generó cobertura documental trazable."
+        )
+    if calidad.get("preguntas", 0) < 1:
+        raise RuntimeError(
+            "El pipeline empaquetado no auditó las preguntas de la clase."
+        )
     return {
         "ok": True,
         "carpeta": str(carpeta),
@@ -106,6 +117,9 @@ def probar_pipeline_completo(raiz: str | Path, documento: str | Path) -> dict:
         "bloques": resultado.get("bloques", 0),
         "flashcards": resultado.get("flashcards", 0),
         "referencias": resultado.get("referencias", 0),
+        "cobertura_documental": calidad.get(
+            "cobertura_documental_porcentaje", 0
+        ),
     }
 
 

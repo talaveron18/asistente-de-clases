@@ -17,7 +17,7 @@ ningún producto de referencia.
 3. **Importar archivo**: transcribir audios y vídeos existentes.
 4. **Mis clases**: buscar y abrir clases dentro de ARGOS.
 5. **Ficha de clase**: consultar resumen, apuntes, transcripción revisada,
-   preguntas y tarjetas sin abrir archivos manualmente.
+   preguntas, tarjetas y fuentes auditadas sin abrir archivos manualmente.
 6. **Biblioteca**: gestionar fuentes médicas locales.
 7. **Preguntar a ARGOS**: consultar la memoria local manteniendo visibles las
    fuentes de cada respuesta.

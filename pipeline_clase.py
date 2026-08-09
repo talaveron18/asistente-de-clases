@@ -60,6 +60,7 @@ class BloqueTematico:
     fin: str
     titulo: str
     texto: str
+    segmentos: list[dict]
     resumen: str
     palabras_clave: list[str]
     avisos_examen: list[str]
@@ -260,6 +261,15 @@ def analizar_clase_completa(
                 fin=grupo[-1]["tiempo"],
                 titulo=_titulo_bloque(textos_limpios, i),
                 texto="\n".join(textos_limpios),
+                segmentos=[
+                    {
+                        "tiempo": entrada["tiempo"],
+                        "rol": entrada["rol"],
+                        "texto": entrada["texto_limpio"],
+                    }
+                    for entrada in grupo
+                    if entrada["texto_limpio"]
+                ],
                 resumen=_resumen_extractivo(textos_limpios),
                 palabras_clave=_palabras_clave(" ".join(textos_limpios)),
                 avisos_examen=avisos,

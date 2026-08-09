@@ -48,6 +48,26 @@ jobs:
           python -m compileall -q .
           python -m pytest -q
 
+      - name: Preparar modelo de validación
+        shell: pwsh
+        env:
+          HF_HUB_DOWNLOAD_TIMEOUT: "180"
+          HF_HUB_ETAG_TIMEOUT: "60"
+        run: |
+          $completado = $false
+          for ($intento = 1; $intento -le 3; $intento++) {
+            python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8')"
+            if ($LASTEXITCODE -eq 0) {
+              $completado = $true
+              break
+            }
+            Write-Host "Descarga del modelo fallida; intento $intento de 3"
+            Start-Sleep -Seconds (10 * $intento)
+          }
+          if (-not $completado) {
+            throw "No se pudo preparar el modelo tiny tras tres intentos"
+          }
+
       - name: Construir ARGOS con FFmpeg incluido
         shell: pwsh
         run: pyinstaller --noconfirm --clean ARGOS.spec
@@ -80,7 +100,9 @@ jobs:
           } | ConvertTo-Json | Set-Content `
             -Path (Join-Path $configDir "config.json") -Encoding utf8
           $env:ARGOS_READY_FILE = Join-Path $env:RUNNER_TEMP "argos-ready-build.json"
+          $env:ARGOS_MODEL_STATUS_FILE = Join-Path $env:RUNNER_TEMP "argos-model-status.json"
           Remove-Item $env:ARGOS_READY_FILE -Force -ErrorAction SilentlyContinue
+          Remove-Item $env:ARGOS_MODEL_STATUS_FILE -Force -ErrorAction SilentlyContinue
           $proceso = Start-Process "dist\ARGOS\ARGOS.exe" -PassThru
           $null = $proceso.WaitForInputIdle(15000)
           $limite = (Get-Date).AddMinutes(8)
@@ -88,12 +110,22 @@ jobs:
             Start-Sleep -Seconds 2
             $proceso.Refresh()
             if ($proceso.HasExited) {
-              throw "ARGOS.exe se cerró antes de cargar Faster-Whisper"
+              $diagnostico = if (Test-Path $env:ARGOS_MODEL_STATUS_FILE) {
+                Get-Content $env:ARGOS_MODEL_STATUS_FILE -Raw
+              } else {
+                "sin diagnóstico de carga"
+              }
+              throw "ARGOS.exe se cerró antes de cargar Faster-Whisper: $diagnostico"
             }
           }
           if (-not (Test-Path $env:ARGOS_READY_FILE)) {
             Stop-Process -Id $proceso.Id -Force -ErrorAction SilentlyContinue
-            throw "Faster-Whisper no terminó de cargar en ocho minutos"
+            $diagnostico = if (Test-Path $env:ARGOS_MODEL_STATUS_FILE) {
+              Get-Content $env:ARGOS_MODEL_STATUS_FILE -Raw
+            } else {
+              "sin diagnóstico de carga"
+            }
+            throw "Faster-Whisper no terminó de cargar en ocho minutos: $diagnostico"
           }
           $resultado = Get-Content $env:ARGOS_READY_FILE -Raw | ConvertFrom-Json
           if (-not $resultado.modelos_cargados) {

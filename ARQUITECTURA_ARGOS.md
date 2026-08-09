@@ -26,7 +26,7 @@ La prioridad es estabilizar el flujo completo de clases antes de ampliar funcion
 - `transcripciones.py`: selección de original o revisión vigente.
 - `correccion_medica.py`: revisión conservadora desde el original.
 - `pipeline_clase.py`: limpieza, segmentación, hallazgos e índice temporal.
-- `material_estudio.py`: Word, flashcards y preguntas.
+- `material_estudio.py`: Word, flashcards, preguntas y trazabilidad auditable.
 - `enriquecedor_argos.py`: referencias documentales sin índice propio.
 
 ### Conocimiento local
@@ -49,11 +49,11 @@ transcripciones.fuente_vigente()
       ↓
 pipeline_clase.py
       ↓
-material_estudio.py
-      ↓
 indice_sqlite.py
       ↓
 enriquecedor_argos.py
+      ↓
+material_estudio.py
 ```
 
 `transcripcion_limpia.txt` es siempre una salida. No puede alimentar correcciones ni futuros reprocesamientos.
@@ -83,7 +83,11 @@ Toda respuesta futura deberá distinguir:
 - contenido de tratados o artículos;
 - inferencias generadas por IA.
 
-Las clases conservan minuto. Los documentos conservan archivo y página.
+Las clases conservan minuto. Los documentos conservan archivo y página. Cada
+procesamiento genera `trazabilidad_argos.json` y una vista legible que mide la
+cobertura documental sin presentarla como una garantía de exactitud clínica.
+Las preguntas solo se marcan como respondidas cuando existe una frase
+afirmativa relacionada en la transcripción.
 
 ## Búsqueda
 

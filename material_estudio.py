@@ -13,7 +13,7 @@ def generar_material_estudio(carpeta: str | Path) -> dict:
         fuente = carpeta / "pipeline_clase.json"
     datos = json.loads(fuente.read_text(encoding="utf-8"))
     flashcards = []
-    preguntas = []
+    preguntas: list[dict] = []
 
     for bloque in datos.get("bloques", []):
         titulo = bloque.get("titulo", "Bloque")
@@ -26,26 +26,38 @@ def generar_material_estudio(carpeta: str | Path) -> dict:
             if respuesta:
                 flashcards.append((f"¿Qué se explicó sobre {clave}?", respuesta, bloque.get("inicio", "")))
         for pregunta in bloque.get("preguntas", []):
+            marca_pregunta = re.match(r"^\[([^\]]+)\]", pregunta)
+            minuto_pregunta = (
+                marca_pregunta.group(1)
+                if marca_pregunta
+                else bloque.get("inicio", "")
+            )
             limpia = re.sub(r"^\[[^\]]+\]\s*", "", pregunta).strip()
             if limpia:
-                preguntas.append(
-                    (
-                        limpia,
-                        _respuesta_desde_bloque(limpia, bloque),
-                        bloque.get("inicio", ""),
-                        titulo,
-                    )
+                respuesta, soporte, minuto_respuesta = _respuesta_desde_bloque(
+                    limpia, bloque
                 )
+                preguntas.append({
+                    "pregunta": limpia,
+                    "respuesta": respuesta,
+                    "minuto": minuto_pregunta,
+                    "minuto_respuesta": minuto_respuesta,
+                    "bloque": titulo,
+                    "soporte": soporte,
+                })
         if not bloque.get("preguntas"):
-            preguntas.append(
-                (
-                    f"Explica los puntos esenciales de {titulo}.",
-                    bloque.get("resumen", "").strip()
-                    or _primera_frase(bloque.get("texto", "")),
-                    bloque.get("inicio", ""),
-                    titulo,
-                )
+            respuesta = (
+                bloque.get("resumen", "").strip()
+                or _primera_frase(bloque.get("texto", ""))
             )
+            preguntas.append({
+                "pregunta": f"Explica los puntos esenciales de {titulo}.",
+                "respuesta": respuesta,
+                "minuto": bloque.get("inicio", ""),
+                "minuto_respuesta": bloque.get("inicio", "") if respuesta else "",
+                "bloque": titulo,
+                "soporte": "resumen_extractivo" if respuesta else "sin_respuesta",
+            })
 
     vistos = set()
     flashcards_unicas = []
@@ -61,12 +73,15 @@ def generar_material_estudio(carpeta: str | Path) -> dict:
         writer.writerows(flashcards_unicas)
 
     lineas = [f"# Preguntas de repaso · {datos.get('titulo', '')}", ""]
-    for i, (pregunta, respuesta, minuto, bloque) in enumerate(preguntas, 1):
+    for i, pregunta in enumerate(preguntas, 1):
+        etiqueta_soporte = _etiqueta_soporte(pregunta["soporte"])
         lineas += [
-            f"{i}. **{pregunta}**",
-            f"   - Respuesta basada en la clase: {respuesta or 'No consta una respuesta explícita.'}",
-            f"   - Bloque: {bloque}",
-            f"   - Referencia: {minuto}",
+            f"{i}. **{pregunta['pregunta']}**",
+            f"   - Respuesta basada en la clase: {pregunta['respuesta'] or 'No consta una respuesta explícita.'}",
+            f"   - Tipo de soporte: {etiqueta_soporte}",
+            f"   - Bloque: {pregunta['bloque']}",
+            f"   - Pregunta formulada: {pregunta['minuto']}",
+            f"   - Evidencia de respuesta: {pregunta['minuto_respuesta'] or 'no localizada'}",
             "",
         ]
     (carpeta / "preguntas_repaso.md").write_text("\n".join(lineas), encoding="utf-8")
@@ -92,12 +107,22 @@ def generar_material_estudio(carpeta: str | Path) -> dict:
         _generar_apuntes_metodo_argos(datos, preguntas), encoding="utf-8"
     )
 
+    trazabilidad = _generar_trazabilidad(datos, preguntas)
+    (carpeta / "trazabilidad_argos.json").write_text(
+        json.dumps(trazabilidad, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (carpeta / "trazabilidad_argos.md").write_text(
+        _generar_markdown_trazabilidad(trazabilidad), encoding="utf-8"
+    )
+
     docx_generado = _generar_docx(carpeta, datos, preguntas, flashcards_unicas)
     archivos = [
         "apuntes_estudio_argos.md",
         "flashcards_argos.tsv",
         "preguntas_repaso.md",
         "repaso_rapido.md",
+        "trazabilidad_argos.json",
+        "trazabilidad_argos.md",
     ]
     if docx_generado:
         archivos.append("apuntes_argos.docx")
@@ -105,6 +130,7 @@ def generar_material_estudio(carpeta: str | Path) -> dict:
     return {
         "flashcards": len(flashcards_unicas),
         "preguntas": len(preguntas),
+        "calidad": trazabilidad["metricas"],
         "archivos": archivos,
         "fuente": fuente.name,
     }
@@ -123,9 +149,36 @@ def _primera_frase(texto: str) -> str:
     return frases[0] if frases else ""
 
 
-def _respuesta_desde_bloque(pregunta: str, bloque: dict) -> str:
+def _es_pregunta(texto: str) -> bool:
+    normal = texto.strip().casefold().lstrip("¿")
+    return "?" in texto or bool(
+        re.match(
+            r"^(?:qué|cuál|cuáles|cómo|por qué|quién|quiénes|dónde|cuándo)\b",
+            normal,
+        )
+    )
+
+
+def _frases_del_bloque(bloque: dict) -> list[tuple[str, str]]:
+    segmentos = bloque.get("segmentos") or []
+    frases_temporales = []
+    for segmento in segmentos:
+        minuto = str(segmento.get("tiempo") or bloque.get("inicio", ""))
+        frases_temporales.extend(
+            (minuto, frase)
+            for frase in _frases(segmento.get("texto", ""))
+        )
+    if frases_temporales:
+        return frases_temporales
+    return [
+        (str(bloque.get("inicio", "")), frase)
+        for frase in _frases(bloque.get("texto", ""))
+    ]
+
+
+def _respuesta_desde_bloque(pregunta: str, bloque: dict) -> tuple[str, str, str]:
     """Extrae una respuesta próxima; nunca completa datos que no estén escritos."""
-    frases = _frases(bloque.get("texto", ""))
+    frases = _frases_del_bloque(bloque)
     pregunta_normalizada = re.sub(r"\W+", " ", pregunta.casefold()).strip()
     palabras = {
         palabra
@@ -133,15 +186,36 @@ def _respuesta_desde_bloque(pregunta: str, bloque: dict) -> str:
         if len(palabra) > 3
         and palabra not in {"como", "cual", "cuales", "donde", "cuando", "porque"}
     }
+    minimo_coincidencias = 1 if len(palabras) <= 1 else 2
     candidatas = [
-        frase
-        for frase in frases
-        if "?" not in frase
-        and sum(palabra in frase.casefold() for palabra in palabras) >= 1
+        (minuto, frase)
+        for minuto, frase in frases
+        if not _es_pregunta(frase)
+        and sum(palabra in frase.casefold() for palabra in palabras)
+        >= minimo_coincidencias
     ]
     if candidatas:
-        return max(candidatas, key=lambda frase: min(len(frase), 600))[:700]
-    return (bloque.get("resumen", "") or _primera_frase(bloque.get("texto", "")))[:700]
+        minuto, respuesta = max(
+            candidatas,
+            key=lambda item: (
+                sum(palabra in item[1].casefold() for palabra in palabras),
+                min(len(item[1]), 600),
+            ),
+        )
+        return (
+            respuesta[:700],
+            "respuesta_explicitada",
+            minuto,
+        )
+    return "", "sin_respuesta", ""
+
+
+def _etiqueta_soporte(soporte: str) -> str:
+    return {
+        "respuesta_explicitada": "respuesta localizada en la transcripción",
+        "resumen_extractivo": "respuesta construida con el resumen extractivo del bloque",
+        "sin_respuesta": "la clase formula la pregunta, pero no conserva una respuesta explícita",
+    }.get(soporte, soporte.replace("_", " "))
 
 
 def _relaciones_fisiopatologicas(texto: str) -> list[str]:
@@ -179,7 +253,7 @@ def _errores_frecuentes(texto: str, avisos: list[str]) -> list[str]:
     return list(dict.fromkeys(encontrados))[:8]
 
 
-def _generar_apuntes_metodo_argos(datos: dict, preguntas: list[tuple]) -> str:
+def _generar_apuntes_metodo_argos(datos: dict, preguntas: list[dict]) -> str:
     lineas = [
         f"# {datos.get('titulo', 'Clase')} · Método ARGOS",
         "",
@@ -257,17 +331,167 @@ def _generar_apuntes_metodo_argos(datos: dict, preguntas: list[tuple]) -> str:
             lineas.append("- No se localizaron referencias documentales próximas.")
 
     lineas += ["", "## Preguntas de parcial con respuesta", ""]
-    for numero, (pregunta, respuesta, minuto, bloque) in enumerate(preguntas, 1):
+    for numero, pregunta in enumerate(preguntas, 1):
         lineas += [
-            f"{numero}. **{pregunta}**",
-            f"   - **Respuesta según la clase:** {respuesta or 'No consta una respuesta explícita.'}",
-            f"   - **Referencia:** {bloque}, {minuto}",
+            f"{numero}. **{pregunta['pregunta']}**",
+            f"   - **Respuesta según la clase:** {pregunta['respuesta'] or 'No consta una respuesta explícita.'}",
+            f"   - **Soporte:** {_etiqueta_soporte(pregunta['soporte'])}",
+            f"   - **Pregunta formulada:** {pregunta['bloque']}, {pregunta['minuto']}",
+            f"   - **Evidencia de respuesta:** {pregunta['minuto_respuesta'] or 'no localizada'}",
             "",
         ]
     return "\n".join(lineas)
 
 
-def _generar_docx(carpeta: Path, datos: dict, preguntas: list, flashcards: list) -> bool:
+def _generar_trazabilidad(datos: dict, preguntas: list[dict]) -> dict:
+    bloques_salida = []
+    total_referencias = 0
+    bloques_con_referencias = 0
+    relaciones_total = 0
+    comparaciones_total = 0
+
+    for bloque in datos.get("bloques", []):
+        referencias = []
+        for referencia in bloque.get("referencias_locales", []):
+            referencias.append({
+                "titulo": referencia.get("titulo", "Documento"),
+                "ubicacion": referencia.get("ubicacion") or (
+                    f"Página {referencia.get('pagina')}"
+                    if referencia.get("pagina")
+                    else "Sin página"
+                ),
+                "pagina": referencia.get("pagina"),
+                "ruta": referencia.get("ruta", ""),
+                "fragmento": referencia.get("fragmento", ""),
+                "vinculada_a_clase": bool(referencia.get("vinculada_a_clase")),
+            })
+        relaciones = _relaciones_fisiopatologicas(bloque.get("texto", ""))
+        comparaciones = _comparaciones(bloque.get("texto", ""))
+        total_referencias += len(referencias)
+        bloques_con_referencias += bool(referencias)
+        relaciones_total += len(relaciones)
+        comparaciones_total += len(comparaciones)
+        bloques_salida.append({
+            "numero": bloque.get("numero"),
+            "titulo": bloque.get("titulo", "Bloque"),
+            "inicio": bloque.get("inicio", ""),
+            "fin": bloque.get("fin", ""),
+            "idea_central": bloque.get("resumen", ""),
+            "relaciones_causales": relaciones,
+            "comparaciones": comparaciones,
+            "avisos_examen": bloque.get("avisos_examen", []),
+            "referencias_documentales": referencias,
+        })
+
+    total_bloques = len(bloques_salida)
+    preguntas_explicitas = sum(
+        pregunta.get("soporte") == "respuesta_explicitada"
+        for pregunta in preguntas
+    )
+    preguntas_resumen = sum(
+        pregunta.get("soporte") == "resumen_extractivo"
+        for pregunta in preguntas
+    )
+    preguntas_sin_respuesta = sum(
+        pregunta.get("soporte") == "sin_respuesta"
+        for pregunta in preguntas
+    )
+    cobertura = round(
+        (bloques_con_referencias / total_bloques) * 100, 1
+    ) if total_bloques else 0.0
+    metricas = {
+        "bloques": total_bloques,
+        "bloques_con_referencia_documental": bloques_con_referencias,
+        "cobertura_documental_porcentaje": cobertura,
+        "referencias_documentales": total_referencias,
+        "relaciones_causales_explicitas": relaciones_total,
+        "comparaciones_explicitas": comparaciones_total,
+        "preguntas": len(preguntas),
+        "preguntas_con_respuesta_explicitada": preguntas_explicitas,
+        "preguntas_desde_resumen": preguntas_resumen,
+        "preguntas_sin_respuesta": preguntas_sin_respuesta,
+    }
+    return {
+        "version": 1,
+        "titulo": datos.get("titulo", "Clase"),
+        "materia": datos.get("materia", ""),
+        "archivo_fuente": datos.get("archivo_fuente", ""),
+        "criterio": (
+            "Solo se atribuyen respuestas explícitas cuando ARGOS localiza una "
+            "frase afirmativa relacionada en la transcripción. La cobertura "
+            "documental mide presencia de referencias, no exactitud clínica."
+        ),
+        "metricas": metricas,
+        "preguntas": preguntas,
+        "bloques": bloques_salida,
+    }
+
+
+def _generar_markdown_trazabilidad(trazabilidad: dict) -> str:
+    metricas = trazabilidad["metricas"]
+    lineas = [
+        f"# Fuentes y control · {trazabilidad.get('titulo', 'Clase')}",
+        "",
+        f"**Transcripción fuente:** {trazabilidad.get('archivo_fuente', '')}",
+        "",
+        f"> {trazabilidad.get('criterio', '')}",
+        "",
+        "## Control de cobertura",
+        "",
+        "| Indicador | Resultado |",
+        "|---|---|",
+        f"| Bloques temáticos | {metricas['bloques']} |",
+        f"| Bloques con referencia documental | {metricas['bloques_con_referencia_documental']} de {metricas['bloques']} ({metricas['cobertura_documental_porcentaje']} %) |",
+        f"| Referencias documentales localizadas | {metricas['referencias_documentales']} |",
+        f"| Relaciones causales explícitas | {metricas['relaciones_causales_explicitas']} |",
+        f"| Comparaciones explícitas | {metricas['comparaciones_explicitas']} |",
+        f"| Preguntas con respuesta localizada | {metricas['preguntas_con_respuesta_explicitada']} de {metricas['preguntas']} |",
+        f"| Preguntas sin respuesta explícita | {metricas['preguntas_sin_respuesta']} |",
+        "",
+    ]
+    for bloque in trazabilidad.get("bloques", []):
+        lineas += [
+            f"## {bloque.get('numero')}. {bloque.get('titulo')}",
+            "",
+            f"**Audio/transcripción:** {bloque.get('inicio')}–{bloque.get('fin')}",
+            "",
+            "### Idea central extraída",
+            "",
+            bloque.get("idea_central") or "No se obtuvo una idea central fiable.",
+            "",
+            "### Referencias documentales",
+            "",
+        ]
+        referencias = bloque.get("referencias_documentales", [])
+        if referencias:
+            for referencia in referencias:
+                prioridad = (
+                    "fuente vinculada por el usuario"
+                    if referencia.get("vinculada_a_clase")
+                    else "biblioteca general"
+                )
+                lineas += [
+                    f"- **{referencia.get('titulo')} · {referencia.get('ubicacion')}** ({prioridad})",
+                    f"  - {referencia.get('fragmento') or 'Sin fragmento disponible.'}",
+                ]
+        else:
+            lineas.append("- Este bloque no tiene contraste documental localizado.")
+        lineas.append("")
+
+    lineas += ["## Auditoría de preguntas", ""]
+    for numero, pregunta in enumerate(trazabilidad.get("preguntas", []), 1):
+        lineas += [
+            f"{numero}. **{pregunta.get('pregunta')}**",
+            f"   - Respuesta: {pregunta.get('respuesta') or 'No consta una respuesta explícita.'}",
+            f"   - Soporte: {_etiqueta_soporte(pregunta.get('soporte', ''))}",
+            f"   - Pregunta formulada: {pregunta.get('bloque')}, {pregunta.get('minuto')}",
+            f"   - Evidencia de respuesta: {pregunta.get('minuto_respuesta') or 'no localizada'}",
+            "",
+        ]
+    return "\n".join(lineas)
+
+
+def _generar_docx(carpeta: Path, datos: dict, preguntas: list[dict], flashcards: list) -> bool:
     try:
         from docx import Document
         from docx.shared import Pt
@@ -349,12 +573,19 @@ def _generar_docx(carpeta: Path, datos: dict, preguntas: list, flashcards: list)
                 )
 
     doc.add_heading("Preguntas de repaso", level=1)
-    for pregunta, respuesta, minuto, bloque in preguntas:
+    for pregunta in preguntas:
         doc.add_paragraph(
-            f"{pregunta} ({bloque}, {minuto})", style="List Number"
+            f"{pregunta['pregunta']} ({pregunta['bloque']}, {pregunta['minuto']})",
+            style="List Number",
         )
         doc.add_paragraph(
-            f"Respuesta basada en la clase: {respuesta or 'No consta una respuesta explícita.'}"
+            "Respuesta basada en la clase: "
+            f"{pregunta['respuesta'] or 'No consta una respuesta explícita.'}"
+        )
+        doc.add_paragraph(f"Soporte: {_etiqueta_soporte(pregunta['soporte'])}")
+        doc.add_paragraph(
+            "Evidencia de respuesta: "
+            f"{pregunta['minuto_respuesta'] or 'no localizada'}"
         )
 
     doc.add_heading("Flashcards", level=1)

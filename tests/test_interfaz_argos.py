@@ -74,6 +74,37 @@ def test_estado_material_exige_todos_los_archivos_obligatorios(tmp_path):
     assert estado.etiqueta == "Material listo"
 
 
+def test_estado_material_resume_la_trazabilidad(tmp_path):
+    for nombre in ARCHIVOS_MATERIAL_COMPLETO:
+        (tmp_path / nombre).write_text("contenido", encoding="utf-8")
+    (tmp_path / "trazabilidad_argos.json").write_text(
+        json.dumps({
+            "metricas": {
+                "cobertura_documental_porcentaje": 75.0,
+                "preguntas_con_respuesta_explicitada": 3,
+                "preguntas": 5,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    estado = leer_estado_material_clase(tmp_path)
+
+    assert estado.clave == "listo"
+    assert "Cobertura documental: 75 %" in estado.detalle
+    assert "Respuestas explícitas localizadas: 3 de 5" in estado.detalle
+
+
+def test_ficha_incluye_fuentes_y_control_como_seccion(tmp_path):
+    trazabilidad = tmp_path / "trazabilidad_argos.md"
+    trazabilidad.write_text("# Fuentes y control", encoding="utf-8")
+
+    ruta, contenido = leer_material_clase(tmp_path, "Fuentes")
+
+    assert ruta == trazabilidad
+    assert "Fuentes y control" in contenido
+
+
 def test_estado_material_muestra_el_error_persistente(tmp_path):
     (tmp_path / "estado_argos.json").write_text(
         json.dumps(
@@ -120,6 +151,29 @@ def test_medidor_conserva_solo_el_ultimo_nivel_publicado():
     AsistenteClasesApp._publicar_nivel_audio(app, 0.72)
 
     assert app._nivel_audio_pendiente == 0.72
+
+
+def test_arranque_de_whisper_deja_diagnostico_sin_simular_exito(
+    tmp_path, monkeypatch
+):
+    estado = tmp_path / "estado-modelo.json"
+    listo = tmp_path / "modelo-listo.json"
+    monkeypatch.setenv("ARGOS_MODEL_STATUS_FILE", str(estado))
+    monkeypatch.setenv("ARGOS_READY_FILE", str(listo))
+
+    AsistenteClasesApp._registrar_progreso_modelos(
+        "Cargando Whisper tiny...", 0.1
+    )
+
+    progreso = json.loads(estado.read_text(encoding="utf-8"))
+    assert progreso["estado"] == "cargando"
+    assert progreso["progreso"] == 0.1
+    assert not listo.exists()
+
+    AsistenteClasesApp._registrar_resultado_modelos(True, "Listo · CPU")
+
+    resultado = json.loads(listo.read_text(encoding="utf-8"))
+    assert resultado == {"modelos_cargados": True, "detalle": "Listo · CPU"}
 
 
 def test_markdown_se_muestra_sin_marcas_tecnicas():

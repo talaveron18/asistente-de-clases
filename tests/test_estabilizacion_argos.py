@@ -87,6 +87,8 @@ def test_flujo_completo_chat_e_idempotencia(tmp_path):
         "flashcards_argos.tsv",
         "preguntas_repaso.md",
         "repaso_rapido.md",
+        "trazabilidad_argos.json",
+        "trazabilidad_argos.md",
         "argos_enriquecido.json",
         "apuntes_argos_enriquecidos.md",
     ]
