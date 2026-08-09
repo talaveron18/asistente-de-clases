@@ -105,7 +105,7 @@ jobs:
           Remove-Item $env:ARGOS_MODEL_STATUS_FILE -Force -ErrorAction SilentlyContinue
           $proceso = Start-Process "dist\ARGOS\ARGOS.exe" -PassThru
           $null = $proceso.WaitForInputIdle(15000)
-          $limite = (Get-Date).AddMinutes(8)
+          $limite = (Get-Date).AddMinutes(2)
           while (-not (Test-Path $env:ARGOS_READY_FILE) -and (Get-Date) -lt $limite) {
             Start-Sleep -Seconds 2
             $proceso.Refresh()
@@ -125,7 +125,7 @@ jobs:
             } else {
               "sin diagnóstico de carga"
             }
-            throw "Faster-Whisper no terminó de cargar en ocho minutos: $diagnostico"
+            throw "ARGOS no terminó de arrancar en dos minutos: $diagnostico"
           }
           $resultado = Get-Content $env:ARGOS_READY_FILE -Raw | ConvertFrom-Json
           if (-not $resultado.modelos_cargados) {

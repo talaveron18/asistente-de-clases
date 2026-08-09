@@ -21,7 +21,7 @@ from interfaz_argos import (
     tarjeta,
     titulo_seccion,
 )
-from main import AsistenteClasesApp
+from main import AsistenteClasesApp, registrar_diagnostico_arranque
 from orquestador import ClaseEnProcesoError, OrquestadorArgos
 
 
@@ -570,6 +570,7 @@ def _mostrar_aviso_instancia(mensaje: str) -> None:
 
 def ejecutar_argos() -> int:
     """Punto de entrada único; garantiza una sola ventana y una sola cola."""
+    registrar_diagnostico_arranque("entrada_argos")
     bloqueo = BloqueoArchivo(
         _ruta_bloqueo_instancia(),
         caducidad_horas=24,
@@ -580,7 +581,9 @@ def ejecutar_argos() -> int:
     )
     try:
         with bloqueo:
+            registrar_diagnostico_arranque("instancia_bloqueada")
             app = ArgosApp()
+            registrar_diagnostico_arranque("aplicacion_construida")
             app.mainloop()
     except BloqueoOcupadoError as exc:
         _mostrar_aviso_instancia(str(exc))

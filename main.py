@@ -43,9 +43,39 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
+def registrar_diagnostico_arranque(
+    etapa: str,
+    detalle: str = "",
+    progreso: float | None = None,
+) -> None:
+    """Persiste la última etapa de arranque solo cuando CI la solicita."""
+    destino = os.environ.get("ARGOS_MODEL_STATUS_FILE", "").strip()
+    if not destino:
+        return
+    datos = {
+        "estado": etapa,
+        "detalle": detalle,
+        "actualizado": time.time(),
+    }
+    if progreso is not None:
+        datos["progreso"] = max(0.0, min(1.0, float(progreso)))
+    ruta = Path(destino)
+    temporal = ruta.with_suffix(ruta.suffix + ".tmp")
+    try:
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        temporal.write_text(
+            json.dumps(datos, ensure_ascii=False), encoding="utf-8"
+        )
+        temporal.replace(ruta)
+    except OSError:
+        pass
+
+
 class AsistenteClasesApp(ctk.CTk):
     def __init__(self):
+        registrar_diagnostico_arranque("creando_ventana")
         super().__init__()
+        registrar_diagnostico_arranque("ventana_base_creada")
         self.title("ARGOS · Asistente de Clases")
         self.geometry("1120x790")
         self.minsize(940, 670)
@@ -75,7 +105,9 @@ class AsistenteClasesApp(ctk.CTk):
         self._nivel_audio_pendiente: float | None = None
         self._nivel_audio_mostrado = 0.0
 
+        registrar_diagnostico_arranque("creando_interfaz")
         self._crear_interfaz()
+        registrar_diagnostico_arranque("interfaz_creada")
         # Tk y CustomTkinter solo se actualizan desde el hilo principal. Los
         # workers publican eventos en una cola que se vacía a ritmo limitado;
         # así el callback de PortAudio no fuerza redibujados concurrentes.
@@ -85,6 +117,7 @@ class AsistenteClasesApp(ctk.CTk):
             self.estado_documentos.configure(
                 text=f"{total} extracción interrumpida marcada para reintento"
             )
+        registrar_diagnostico_arranque("iniciando_modelos")
         self._cargar_modelos()
 
     def _crear_interfaz(self):
@@ -2164,17 +2197,8 @@ class AsistenteClasesApp(ctk.CTk):
     @staticmethod
     def _registrar_progreso_modelos(detalle: str, progreso: float) -> None:
         """Deja diagnóstico de arranque para CI sin alterar la señal final."""
-        destino = os.environ.get("ARGOS_MODEL_STATUS_FILE", "").strip()
-        if not destino:
-            return
-        AsistenteClasesApp._escribir_estado_modelos(
-            Path(destino),
-            {
-                "estado": "cargando",
-                "progreso": max(0.0, min(1.0, float(progreso))),
-                "detalle": detalle,
-                "actualizado": time.time(),
-            },
+        registrar_diagnostico_arranque(
+            "cargando_modelos", detalle, progreso
         )
 
     @staticmethod

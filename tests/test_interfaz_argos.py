@@ -166,7 +166,7 @@ def test_arranque_de_whisper_deja_diagnostico_sin_simular_exito(
     )
 
     progreso = json.loads(estado.read_text(encoding="utf-8"))
-    assert progreso["estado"] == "cargando"
+    assert progreso["estado"] == "cargando_modelos"
     assert progreso["progreso"] == 0.1
     assert not listo.exists()
 
