@@ -860,6 +860,101 @@ def test_finalizar_grabacion_registra_audio_completo(tmp_path):
     assert repositorio.obtener_audio_clase(carpeta) == carpeta / "audio.wav"
 
 
+def test_pasada_final_usa_audio_completo_y_conserva_borrador_directo(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    carpeta = repositorio.iniciar_grabacion("Patología", "Shock")
+    _wav(carpeta / "audio.wav", frames=30, sample_rate=10)
+    fragmento_wav = carpeta / "fragmentos_audio" / "fragmento_000001.wav"
+    _wav(fragmento_wav)
+
+    class TranscriptorFalso:
+        @staticmethod
+        def transcribir_fragmento(_ruta):
+            return [
+                SegmentoTranscrito(
+                    0, 1, "El shock es una", "SPEAKER_00", "Docente"
+                )
+            ]
+
+        @staticmethod
+        def transcribir_archivo(
+            ruta, callback_progreso=None, min_hablantes=2, max_hablantes=10
+        ):
+            assert ruta == str(carpeta / "audio.wav")
+            assert (min_hablantes, max_hablantes) == (2, 4)
+            if callback_progreso:
+                callback_progreso("escuchando todo", 0.5)
+            return [
+                SegmentoTranscrito(
+                    0,
+                    3,
+                    "El shock es una insuficiencia circulatoria aguda.",
+                    "SPEAKER_00",
+                    "Docente",
+                )
+            ]
+
+    incremental = TranscripcionIncremental(
+        TranscriptorFalso(),
+        repositorio,
+        carpeta,
+        consolidar_audio_completo=True,
+        min_hablantes=2,
+        max_hablantes=4,
+    )
+    incremental.encolar(FragmentoAudio(1, str(fragmento_wav), 0, 1))
+    resultado = incremental.finalizar()
+
+    assert resultado.completa
+    assert resultado.transcripcion_final
+    assert "insuficiencia circulatoria aguda" in (
+        carpeta / "transcripcion.txt"
+    ).read_text(encoding="utf-8")
+    assert "El shock es una" in (carpeta / "transcripcion_directo.txt").read_text(
+        encoding="utf-8"
+    )
+    ficha = json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))
+    assert ficha["transcripcion_final"] is True
+    assert ficha["fuente_transcripcion"] == "audio_completo"
+
+
+def test_fallo_pasada_final_conserva_texto_directo_y_marca_recuperacion(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    carpeta = repositorio.iniciar_grabacion("Microbiología", "Virus")
+    _wav(carpeta / "audio.wav", frames=20, sample_rate=10)
+    fragmento_wav = carpeta / "fragmentos_audio" / "fragmento_000001.wav"
+    _wav(fragmento_wav)
+
+    class TranscriptorFalso:
+        @staticmethod
+        def transcribir_fragmento(_ruta):
+            return [
+                SegmentoTranscrito(0, 1, "Virus ARN", "SPEAKER_00", "Docente")
+            ]
+
+        @staticmethod
+        def transcribir_archivo(*_args, **_kwargs):
+            raise RuntimeError("modelo temporalmente ocupado")
+
+    incremental = TranscripcionIncremental(
+        TranscriptorFalso(),
+        repositorio,
+        carpeta,
+        consolidar_audio_completo=True,
+    )
+    incremental.encolar(FragmentoAudio(1, str(fragmento_wav), 0, 1))
+    resultado = incremental.finalizar()
+
+    assert not resultado.completa
+    assert not resultado.transcripcion_final
+    assert "Virus ARN" in (carpeta / "transcripcion.txt").read_text(
+        encoding="utf-8"
+    )
+    ficha = json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))
+    assert ficha["estado_grabacion"] == "transcripcion_incompleta"
+    assert ficha["transcripcion_final"] is False
+
+
 def test_listar_clases_reconoce_audio_antiguo_sin_metadatos(tmp_path):
     repositorio = RepositorioClases(str(tmp_path / "clases"))
     carpeta = repositorio.iniciar_grabacion("Microbiología", "Virus")

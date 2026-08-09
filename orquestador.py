@@ -49,9 +49,9 @@ class OrquestadorArgos:
     PASOS = (
         "correccion_medica",
         "analisis_clase",
-        "material_estudio",
         "indice_fts5",
         "referencias_locales",
+        "material_estudio",
     )
 
     def __init__(self, indice: IndiceConocimientoSQLite):
@@ -142,26 +142,17 @@ class OrquestadorArgos:
                     analizar_clase_completa,
                     callback,
                 )
-                material = self._paso(
-                    carpeta,
-                    estado,
-                    "material_estudio",
-                    "Generando apuntes, Word y flashcards...",
-                    0.55,
-                    generar_material_estudio,
-                    callback,
-                )
                 indice = self._paso(
                     carpeta,
                     estado,
                     "indice_fts5",
                     "Actualizando el índice único...",
-                    0.75,
+                    0.52,
                     lambda _carpeta: self.indice.reconstruir(
                         callback=(
                             (lambda mensaje, valor: callback(
                                 mensaje,
-                                0.75 + (0.14 * valor),
+                                0.52 + (0.16 * valor),
                             ))
                             if callback
                             else None
@@ -174,10 +165,19 @@ class OrquestadorArgos:
                     estado,
                     "referencias_locales",
                     "Buscando referencias en la biblioteca...",
-                    0.90,
+                    0.70,
                     lambda ruta: enriquecer_clase_con_fuentes(
                         ruta, indice=self.indice
                     ),
+                    callback,
+                )
+                material = self._paso(
+                    carpeta,
+                    estado,
+                    "material_estudio",
+                    "Generando apuntes ARGOS, tablas, preguntas y flashcards...",
+                    0.86,
+                    generar_material_estudio,
                     callback,
                 )
 

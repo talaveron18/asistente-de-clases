@@ -20,7 +20,11 @@ COLOR_PELIGRO = "#EF5A67"
 
 MATERIALES_CLASE = {
     "Resumen": ("repaso_rapido.md", "analisis_clase.md"),
-    "Apuntes": ("apuntes_argos_enriquecidos.md", "apuntes_argos.md"),
+    "Apuntes": (
+        "apuntes_estudio_argos.md",
+        "apuntes_argos_enriquecidos.md",
+        "apuntes_argos.md",
+    ),
     "Transcripción": (
         "transcripcion_medica_revisada.txt",
         "transcripcion.txt",

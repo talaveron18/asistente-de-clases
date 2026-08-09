@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from biblioteca_medica import BibliotecaMedica
+from enriquecedor_argos import enriquecer_clase_con_fuentes
 from indice_sqlite import IndiceConocimientoSQLite
+from repositorio import RepositorioClases
 
 
 def test_documento_importado_y_procesado_llega_al_indice(tmp_path):
@@ -207,3 +209,67 @@ def test_indice_conserva_categoria_y_pagina_documental(tmp_path):
     assert resultados[0].categoria == "Exámenes"
     assert resultados[0].pagina == 2
     assert resultados[0].ubicacion == "Página 2"
+
+
+def test_fuente_vinculada_a_clase_se_prioriza_frente_a_biblioteca_general(
+    tmp_path,
+):
+    raiz = tmp_path / "Asistente de Clases"
+    biblioteca = BibliotecaMedica(str(raiz / "Biblioteca médica"))
+    profesor = tmp_path / "diapositivas_profesor.txt"
+    tratado = tmp_path / "tratado_general.txt"
+    profesor.write_text(
+        "El shock distributivo cursa con vasodilatación según la clase.",
+        encoding="utf-8",
+    )
+    tratado.write_text(
+        "El shock distributivo es una forma de insuficiencia circulatoria.",
+        encoding="utf-8",
+    )
+    item_profesor, _ = biblioteca.importar_archivo(str(profesor), "Apuntes")
+    item_tratado, _ = biblioteca.importar_archivo(str(tratado), "Tratados")
+    biblioteca.procesar_documento(item_profesor["id"])
+    biblioteca.procesar_documento(item_tratado["id"])
+
+    repositorio = RepositorioClases(str(raiz))
+    clase = repositorio.iniciar_grabacion("Fisiopatología", "Shock")
+    repositorio.vincular_documentos(clase, [item_profesor])
+    (clase / "pipeline_clase.json").write_text(
+        json.dumps(
+            {
+                "titulo": "Shock",
+                "materia": "Fisiopatología",
+                "archivo_fuente": "transcripcion.txt",
+                "bloques": [
+                    {
+                        "numero": 1,
+                        "titulo": "Shock distributivo",
+                        "inicio": "00:00",
+                        "fin": "05:00",
+                        "resumen": "Shock distributivo.",
+                        "texto": "Shock distributivo y vasodilatación.",
+                        "palabras_clave": ["shock", "distributivo"],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    indice = IndiceConocimientoSQLite(str(raiz))
+    indice.reconstruir()
+    filtrados = indice.buscar(
+        "shock distributivo",
+        alcance="Biblioteca médica",
+        rutas=[item_profesor["ruta"]],
+    )
+    enriquecido = enriquecer_clase_con_fuentes(clase, indice=indice)
+
+    assert filtrados
+    assert {resultado.titulo for resultado in filtrados} == {
+        "diapositivas_profesor.txt"
+    }
+    referencias = enriquecido["bloques"][0]["referencias_locales"]
+    assert referencias[0]["titulo"] == "diapositivas_profesor.txt"
+    assert referencias[0]["vinculada_a_clase"] is True

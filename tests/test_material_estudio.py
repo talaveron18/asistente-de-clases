@@ -38,6 +38,17 @@ class MaterialEstudioTests(unittest.TestCase):
             self.assertTrue((carpeta / "flashcards_argos.tsv").exists())
             self.assertTrue((carpeta / "preguntas_repaso.md").exists())
             self.assertTrue((carpeta / "repaso_rapido.md").exists())
+            self.assertTrue((carpeta / "apuntes_estudio_argos.md").exists())
+            preguntas = (carpeta / "preguntas_repaso.md").read_text(
+                encoding="utf-8"
+            )
+            apuntes = (carpeta / "apuntes_estudio_argos.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("Respuesta basada en la clase", preguntas)
+            self.assertIn("Historia fisiopatológica", apuntes)
+            self.assertIn("Produce hipoperfusión tisular", apuntes)
+            self.assertIn("Preguntas de parcial con respuesta", apuntes)
             try:
                 import docx  # noqa: F401
                 self.assertTrue((carpeta / "apuntes_argos.docx").exists())

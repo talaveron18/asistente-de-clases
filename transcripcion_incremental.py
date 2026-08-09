@@ -19,6 +19,7 @@ class ResultadoGrabacion:
     carpeta: Path
     segmentos: list[SegmentoTranscrito]
     errores: tuple[str, ...]
+    transcripcion_final: bool = False
 
     @property
     def completa(self) -> bool:
@@ -39,12 +40,18 @@ class TranscripcionIncremental:
         carpeta: str | Path,
         callback_segmentos: Callable[[list[SegmentoTranscrito]], None] | None = None,
         callback_estado: Callable[[str], None] | None = None,
+        consolidar_audio_completo: bool = False,
+        min_hablantes: int = 2,
+        max_hablantes: int = 10,
     ):
         self.transcriptor = transcriptor
         self.repositorio = repositorio
         self.carpeta = Path(carpeta)
         self.callback_segmentos = callback_segmentos
         self.callback_estado = callback_estado
+        self.consolidar_audio_completo = consolidar_audio_completo
+        self.min_hablantes = min_hablantes
+        self.max_hablantes = max_hablantes
         self._cola: queue.Queue[FragmentoAudio | None] = queue.Queue()
         self._errores: list[str] = []
         self._cerrada = False
@@ -77,11 +84,70 @@ class TranscripcionIncremental:
             self._errores.append(
                 "La cola de transcripción no terminó dentro del tiempo previsto."
             )
+        segmentos_directo = self.repositorio.segmentos_grabacion(self.carpeta)
+        segmentos_finales = None
+        if self.consolidar_audio_completo and not self._hilo.is_alive():
+            segmentos_finales = self._consolidar_audio_completo(segmentos_directo)
+            if segmentos_finales is not None:
+                # La pasada completa cubre también cualquier fragmento que haya
+                # fallado durante el directo. Los diagnósticos permanecen en
+                # disco, pero la clase ya no está incompleta.
+                self._errores.clear()
         error = "\n".join(dict.fromkeys(self._errores)) or None
-        segmentos = self.repositorio.finalizar_grabacion(self.carpeta, error)
-        return ResultadoGrabacion(
-            self.carpeta, segmentos, tuple(dict.fromkeys(self._errores))
+        segmentos = self.repositorio.finalizar_grabacion(
+            self.carpeta,
+            error,
+            segmentos_finales=segmentos_finales,
         )
+        return ResultadoGrabacion(
+            self.carpeta,
+            segmentos,
+            tuple(dict.fromkeys(self._errores)),
+            transcripcion_final=segmentos_finales is not None,
+        )
+
+    def _consolidar_audio_completo(
+        self, segmentos_directo: list[SegmentoTranscrito]
+    ) -> list[SegmentoTranscrito] | None:
+        audio = self.carpeta / "audio.wav"
+        if not audio.is_file() or audio.stat().st_size <= 44:
+            self._errores.append(
+                "No se pudo crear la transcripción final: falta el audio completo."
+            )
+            return None
+        self._estado(
+            "Audio completo guardado. Preparando la transcripción definitiva…"
+        )
+
+        def progreso(mensaje: str, _valor: float) -> None:
+            self._estado(f"Transcripción definitiva: {mensaje}")
+
+        try:
+            finales = self.transcriptor.transcribir_archivo(
+                str(audio),
+                callback_progreso=progreso,
+                min_hablantes=self.min_hablantes,
+                max_hablantes=self.max_hablantes,
+            )
+        except Exception as exc:
+            self._errores.append(f"Transcripción definitiva: {exc}")
+            self._estado(
+                "No terminó la pasada definitiva; se conserva el texto en directo."
+            )
+            return None
+        if segmentos_directo and not finales:
+            self._errores.append(
+                "La pasada definitiva no detectó texto aunque sí existe "
+                "transcripción en directo."
+            )
+            self._estado(
+                "La pasada definitiva no detectó voz; se conserva el texto en directo."
+            )
+            return None
+        self._estado(
+            "Transcripción definitiva completada sobre el audio íntegro."
+        )
+        return list(finales)
 
     def cerrar_sin_esperar(self) -> None:
         """Permite cerrar la ventana; la recuperación continuará al reiniciar."""

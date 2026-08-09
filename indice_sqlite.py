@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 from extracciones import ruta_documento_de, ruta_extraccion_de
 from transcripciones import fuente_vigente, procedencia
@@ -249,6 +250,7 @@ class IndiceConocimientoSQLite:
         consulta: str,
         alcance: str = "Todo",
         limite: int = 40,
+        rutas: Iterable[str] | None = None,
     ) -> list[CoincidenciaFTS]:
         consulta = consulta.strip()
         if len(consulta) < 2:
@@ -263,6 +265,11 @@ class IndiceConocimientoSQLite:
         elif alcance not in {"Todo", ""}:
             filtros.append("categoria = ?")
             parametros.append(alcance)
+        rutas_normalizadas = [str(Path(ruta)) for ruta in (rutas or []) if ruta]
+        if rutas_normalizadas:
+            marcadores = ", ".join("?" for _ in rutas_normalizadas)
+            filtros.append(f"ruta IN ({marcadores})")
+            parametros.extend(rutas_normalizadas)
         extra = " AND " + " AND ".join(filtros) if filtros else ""
         sql = f"""
             SELECT tipo_fuente, categoria, titulo, materia, ubicacion,

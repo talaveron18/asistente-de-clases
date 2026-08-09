@@ -644,6 +644,27 @@ class AsistenteClasesApp(ctk.CTk):
         )
         self.meta_detalle.pack(fill="x", padx=24, pady=(3, 12))
 
+        fila_fuentes = ctk.CTkFrame(self.tab_detalle, fg_color="transparent")
+        fila_fuentes.pack(fill="x", padx=24, pady=(0, 10))
+        self.fuentes_detalle = ctk.CTkLabel(
+            fila_fuentes,
+            text="Sin apuntes del profesor vinculados.",
+            text_color=COLOR_TEXTO_SUAVE,
+            anchor="w",
+        )
+        self.fuentes_detalle.pack(side="left", fill="x", expand=True)
+        self.btn_vincular_fuentes = ctk.CTkButton(
+            fila_fuentes,
+            text="Vincular PDF o apuntes",
+            width=165,
+            height=32,
+            fg_color=COLOR_PANEL_SUAVE,
+            border_width=1,
+            border_color=COLOR_BORDE,
+            command=self._vincular_fuentes_clase,
+        )
+        self.btn_vincular_fuentes.pack(side="right")
+
         self.selector_detalle = ctk.CTkSegmentedButton(
             self.tab_detalle,
             values=["Resumen", "Apuntes", "Transcripción", "Preguntas", "Tarjetas"],
@@ -680,6 +701,16 @@ class AsistenteClasesApp(ctk.CTk):
             meta += f"  ·  Clase {int(ficha['numero']):03d}"
         if fecha:
             meta += f"  ·  {fecha}"
+        vinculados = ficha.get("documentos_vinculados", [])
+        total_vinculados = len(vinculados) if isinstance(vinculados, list) else 0
+        self.fuentes_detalle.configure(
+            text=(
+                f"{total_vinculados} fuente(s) del profesor vinculada(s). "
+                "ARGOS las prioriza frente a la biblioteca general."
+                if total_vinculados
+                else "Sin apuntes del profesor vinculados."
+            )
+        )
         audio = None
         try:
             audio = self.repositorio.obtener_audio_clase(carpeta)
@@ -707,6 +738,70 @@ class AsistenteClasesApp(ctk.CTk):
         self.selector_detalle.set("Resumen")
         self._mostrar_seccion_detalle("Resumen")
         self.tabs.set("Detalle de clase")
+
+    def _vincular_fuentes_clase(self):
+        if not self._ruta_detalle:
+            return
+        rutas = filedialog.askopenfilenames(
+            title="Vincular PDF o apuntes a esta clase",
+            filetypes=[
+                ("Documentos", "*.pdf *.docx *.txt *.md"),
+                ("PDF", "*.pdf"),
+                ("Todos", "*.*"),
+            ],
+        )
+        if not rutas:
+            return
+        carpeta = Path(self._ruta_detalle)
+        self.btn_vincular_fuentes.configure(state="disabled", text="Procesando…")
+        self.estado.configure(
+            text=f"Preparando {len(rutas)} fuente(s) para esta clase…"
+        )
+
+        def worker():
+            documentos = []
+            errores = []
+            for ruta in rutas:
+                try:
+                    item, _creado = self.biblioteca_medica.importar_archivo(
+                        ruta, "Apuntes"
+                    )
+                    if item.get("estado_indice_ia") != "texto_extraido":
+                        item = self.biblioteca_medica.procesar_documento(item["id"])
+                    documentos.append(item)
+                    if item.get("requiere_ocr"):
+                        errores.append(
+                            f"{item.get('nombre')}: el PDF parece escaneado y requiere OCR."
+                        )
+                except Exception as exc:
+                    errores.append(f"{Path(ruta).name}: {exc}")
+            if documentos:
+                self.repositorio.vincular_documentos(carpeta, documentos)
+            self._enviar_ui(
+                self._fin_vincular_fuentes, carpeta, documentos, errores
+            )
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="argos-vincular-fuentes-clase",
+        ).start()
+
+    def _fin_vincular_fuentes(self, carpeta, documentos, errores):
+        self.btn_vincular_fuentes.configure(
+            state="normal", text="Vincular PDF o apuntes"
+        )
+        self._abrir_clase_en_argos(carpeta)
+        if documentos and hasattr(self, "_encolar_pipeline"):
+            self.estado.configure(
+                text="Fuentes vinculadas. Actualizando el material de la clase…"
+            )
+            self._encolar_pipeline(carpeta, automatico=True)
+        if errores:
+            messagebox.showwarning(
+                "Fuentes de la clase",
+                "Algunas fuentes necesitan revisión:\n\n" + "\n".join(errores),
+            )
 
     def _reproducir_audio_clase(self, ruta):
         try:
@@ -1284,6 +1379,9 @@ class AsistenteClasesApp(ctk.CTk):
             callback_estado=lambda mensaje: self._enviar_ui(
                 self.estado.configure, {"text": mensaje}
             ),
+            consolidar_audio_completo=True,
+            min_hablantes=self.config_obj.min_hablantes,
+            max_hablantes=self.config_obj.max_hablantes,
         )
         self.grabador = GrabadorAudio(dispositivo.sample_rate, dispositivo.indice)
         ok = self.grabador.iniciar(
@@ -1534,7 +1632,10 @@ class AsistenteClasesApp(ctk.CTk):
             text="●  Guardando", text_color=COLOR_ALERTA
         )
         self.estado.configure(
-            text="Deteniendo el micrófono; terminando únicamente los fragmentos pendientes…"
+            text=(
+                "Deteniendo el micrófono; cerrando los fragmentos y preparando "
+                "la transcripción definitiva…"
+            )
         )
 
         def worker():
@@ -1826,6 +1927,9 @@ class AsistenteClasesApp(ctk.CTk):
                         callback_estado=lambda mensaje: self._enviar_ui(
                             self.estado.configure, {"text": mensaje}
                         ),
+                        consolidar_audio_completo=True,
+                        min_hablantes=self.config_obj.min_hablantes,
+                        max_hablantes=self.config_obj.max_hablantes,
                     )
                     incremental.encolar_varios(
                         self.repositorio.fragmentos_pendientes(carpeta)

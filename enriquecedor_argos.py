@@ -23,6 +23,15 @@ def enriquecer_clase_con_fuentes(
         raise FileNotFoundError(pipeline_path)
     datos = json.loads(pipeline_path.read_text(encoding="utf-8"))
     indice = indice or IndiceConocimientoSQLite(str(carpeta.parent.parent))
+    try:
+        ficha = json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        ficha = {}
+    rutas_vinculadas = {
+        str(Path(item.get("ruta", "")))
+        for item in ficha.get("documentos_vinculados", [])
+        if isinstance(item, dict) and item.get("ruta")
+    }
 
     bloques_enriquecidos = []
     for bloque in datos.get("bloques", []):
@@ -30,11 +39,22 @@ def enriquecer_clase_con_fuentes(
             " ".join(bloque.get("palabras_clave", [])[:5])
             or bloque.get("titulo", "")
         )
-        resultados = indice.buscar(
+        resultados_vinculados = (
+            indice.buscar(
+                consulta,
+                alcance="Biblioteca médica",
+                limite=max(8, limite_por_bloque * 3),
+                rutas=sorted(rutas_vinculadas),
+            )
+            if rutas_vinculadas
+            else []
+        )
+        resultados_generales = indice.buscar(
             consulta,
             alcance="Biblioteca médica",
             limite=max(8, limite_por_bloque * 3),
         )
+        resultados = [*resultados_vinculados, *resultados_generales]
         referencias = []
         vistos = set()
         for resultado in resultados:
@@ -50,6 +70,8 @@ def enriquecer_clase_con_fuentes(
                     "pagina": resultado.pagina,
                     "fragmento": resultado.contenido,
                     "ruta": resultado.ruta,
+                    "vinculada_a_clase": str(Path(resultado.ruta))
+                    in rutas_vinculadas,
                 }
             )
             if len(referencias) >= limite_por_bloque:
@@ -60,6 +82,7 @@ def enriquecer_clase_con_fuentes(
 
     salida = dict(datos)
     salida["bloques"] = bloques_enriquecidos
+    salida["documentos_vinculados"] = ficha.get("documentos_vinculados", [])
     salida["politica_fuentes"] = (
         "Las referencias se recuperan del único índice FTS5 local. No validan "
         "por sí solas la exactitud clínica y deben revisarse en el original."
@@ -117,10 +140,16 @@ def _markdown_enriquecido(datos: dict) -> str:
             ]
             continue
         for numero, referencia in enumerate(referencias, 1):
+            etiqueta = (
+                "Fuente vinculada a esta clase"
+                if referencia.get("vinculada_a_clase")
+                else "Biblioteca local"
+            )
             lineas += [
                 f"{numero}. **{referencia.get('titulo')} · "
                 f"{referencia.get('ubicacion')}**",
                 f"   - Categoría: {referencia.get('categoria')}",
+                f"   - Prioridad: {etiqueta}",
                 f"   - Fragmento: {referencia.get('fragmento')}",
                 "",
             ]

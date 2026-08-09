@@ -341,10 +341,17 @@ class RepositorioClases:
 
     @staticmethod
     def finalizar_grabacion(
-        carpeta: str | Path, error: str | None = None
+        carpeta: str | Path,
+        error: str | None = None,
+        segmentos_finales: Iterable[SegmentoTranscrito] | None = None,
     ) -> list[SegmentoTranscrito]:
         carpeta = Path(carpeta)
-        segmentos = RepositorioClases.segmentos_grabacion(carpeta)
+        segmentos_directo = RepositorioClases.segmentos_grabacion(carpeta)
+        if segmentos_finales is not None:
+            segmentos = list(segmentos_finales)
+            RepositorioClases._conservar_transcripcion_directo(carpeta)
+        else:
+            segmentos = segmentos_directo
         RepositorioClases._escribir_transcripciones(carpeta, segmentos)
         estado = "transcripcion_incompleta" if error else (
             "guardada" if segmentos else "sin_voz"
@@ -354,9 +361,67 @@ class RepositorioClases:
             ficha_path = carpeta / "ficha.json"
             ficha = json.loads(ficha_path.read_text(encoding="utf-8"))
             ficha["segmentos"] = len(segmentos)
+            ficha["transcripcion_final"] = segmentos_finales is not None
+            ficha["fuente_transcripcion"] = (
+                "audio_completo" if segmentos_finales is not None else "fragmentos_directo"
+            )
+            if segmentos_finales is not None:
+                ficha["transcripcion_finalizada_iso"] = datetime.now().isoformat(
+                    timespec="seconds"
+                )
             ficha.update(_metadatos_archivo_audio(carpeta / "audio.wav"))
             _escribir_json_atomico(ficha_path, ficha)
         return segmentos
+
+    @staticmethod
+    def vincular_documentos(
+        carpeta: str | Path, documentos: Iterable[dict]
+    ) -> list[dict]:
+        """Asocia fuentes concretas a una clase sin duplicarlas en disco."""
+        carpeta = Path(carpeta)
+        ficha_path = carpeta / "ficha.json"
+        with _FICHA_LOCK:
+            ficha = json.loads(ficha_path.read_text(encoding="utf-8"))
+            existentes = {
+                str(item.get("id") or item.get("ruta")): item
+                for item in ficha.get("documentos_vinculados", [])
+                if isinstance(item, dict)
+            }
+            for documento in documentos:
+                if not isinstance(documento, dict):
+                    continue
+                item = {
+                    "id": str(documento.get("id", "")),
+                    "nombre": str(documento.get("nombre", "Documento")),
+                    "categoria": str(documento.get("categoria", "Apuntes")),
+                    "ruta": str(documento.get("ruta", "")),
+                }
+                clave = item["id"] or item["ruta"]
+                if clave:
+                    existentes[clave] = item
+            vinculados = list(existentes.values())
+            ficha["documentos_vinculados"] = vinculados
+            ficha["ultima_actualizacion"] = datetime.now().isoformat(
+                timespec="seconds"
+            )
+            _escribir_json_atomico(ficha_path, ficha)
+        return vinculados
+
+    @staticmethod
+    def _conservar_transcripcion_directo(carpeta: Path) -> None:
+        """Guarda el borrador visible antes de sustituirlo por la pasada final."""
+        for origen, destino in (
+            ("transcripcion.txt", "transcripcion_directo.txt"),
+            ("transcripcion.md", "transcripcion_directo.md"),
+            ("subtitulos.srt", "subtitulos_directo.srt"),
+        ):
+            ruta_origen = carpeta / origen
+            ruta_destino = carpeta / destino
+            if ruta_destino.exists() or not ruta_origen.exists():
+                continue
+            _escribir_texto_atomico(
+                ruta_destino, ruta_origen.read_text(encoding="utf-8")
+            )
 
     @staticmethod
     def _escribir_transcripciones(
