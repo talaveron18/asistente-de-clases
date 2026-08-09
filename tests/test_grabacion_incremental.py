@@ -361,6 +361,40 @@ def test_hardware_automatico_adapta_frecuencia_nativa(monkeypatch):
     assert dispositivo.sample_rate == 48000
 
 
+def test_prueba_manual_informa_el_nivel_mientras_escucha():
+    niveles = []
+
+    class StreamFalso:
+        def __init__(self, callback, **_kwargs):
+            self.callback = callback
+
+        def start(self):
+            self.callback(
+                np.full((100, 1), 2400, dtype=np.int16), 100, None, None
+            )
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    class SoundDeviceFalso:
+        InputStream = StreamFalso
+
+    entrada = DispositivoEntrada(4, "Micrófono Realtek", 48000, 1, "WASAPI")
+
+    nivel = GrabadorAudio.medir_senal(
+        entrada,
+        duracion=0.1,
+        sd=SoundDeviceFalso,
+        callback_nivel=niveles.append,
+    )
+
+    assert nivel >= UMBRAL_SENAL_UTIL
+    assert niveles == [nivel]
+
+
 def test_grabador_persiste_fragmentos_sin_bloquear_callback(
     tmp_path, monkeypatch
 ):
@@ -580,6 +614,91 @@ def test_cambio_manual_reinicia_la_lista_despues_de_agotarla():
     grabador._cerrar_stream()
 
 
+def test_seleccion_manual_abre_la_ruta_exacta_durante_la_grabacion():
+    aperturas = []
+    cambios = []
+
+    class StreamFalso:
+        def __init__(self, device, **_kwargs):
+            aperturas.append(device)
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    class SoundDeviceFalso:
+        InputStream = StreamFalso
+
+    entradas = [
+        DispositivoEntrada(3, "AI Noise-cancelling Input", 48000, 1, "MME"),
+        DispositivoEntrada(11, "Micrófono Realtek", 48000, 2, "WASAPI"),
+        DispositivoEntrada(18, "Micrófono USB", 44100, 1, "WASAPI"),
+    ]
+    grabador = GrabadorAudio(sample_rate=48000, dispositivo=3)
+    grabador.is_recording = True
+    grabador._sd = SoundDeviceFalso
+    grabador._callback_nivel = None
+    grabador._candidatos_entrada = entradas
+    grabador._dispositivo_activo = entradas[0]
+    grabador._callback_dispositivo = lambda entrada, motivo: cambios.append(
+        (entrada.indice, motivo)
+    )
+
+    assert grabador.seleccionar_entrada(18)
+
+    assert aperturas == [18]
+    assert grabador.dispositivo == 18
+    assert grabador._indice_candidato == 2
+    assert (18, "seleccion_manual") in cambios
+    grabador.is_recording = False
+    grabador._cerrar_stream()
+
+
+def test_grabacion_puede_fijar_entrada_sin_rotacion_automatica(
+    tmp_path, monkeypatch
+):
+    streams = []
+
+    class StreamFalso:
+        def __init__(self, device, **_kwargs):
+            streams.append(device)
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    class SoundDeviceFalso:
+        InputStream = StreamFalso
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+    entradas = [
+        DispositivoEntrada(7, "Micrófono elegido", 48000, 1, "WASAPI"),
+        DispositivoEntrada(8, "Otra entrada", 48000, 1, "MME"),
+    ]
+    grabador = GrabadorAudio(sample_rate=48000, dispositivo=7)
+
+    assert grabador.iniciar(
+        archivo_salida=str(tmp_path / "audio.wav"),
+        candidatos_entrada=entradas,
+        priorizar_senal_inicial=False,
+        supervisar_entrada=False,
+    )
+    time.sleep(0.3)
+    grabador.detener()
+
+    assert streams == [7]
+
+
 def test_prueba_real_descarta_el_mejor_puntuado_si_esta_mudo(
     tmp_path, monkeypatch
 ):
@@ -723,6 +842,52 @@ def test_transcripcion_se_guarda_antes_de_detener(tmp_path):
     assert json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))[
         "estado_grabacion"
     ] == "guardada"
+
+
+def test_finalizar_grabacion_registra_audio_completo(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    carpeta = repositorio.iniciar_grabacion("Patología", "Shock")
+    _wav(carpeta / "audio.wav", frames=25, sample_rate=10)
+
+    repositorio.finalizar_grabacion(carpeta)
+
+    ficha = json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))
+    assert ficha["audio"] == "audio.wav"
+    assert ficha["audio_guardado"] is True
+    assert ficha["audio_duracion_segundos"] == 2.5
+    assert ficha["audio_sample_rate"] == 10
+    assert ficha["audio_bytes"] == (carpeta / "audio.wav").stat().st_size
+    assert repositorio.obtener_audio_clase(carpeta) == carpeta / "audio.wav"
+
+
+def test_listar_clases_reconoce_audio_antiguo_sin_metadatos(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    carpeta = repositorio.iniciar_grabacion("Microbiología", "Virus")
+    _wav(carpeta / "audio.wav", frames=10, sample_rate=10)
+
+    clase = repositorio.listar_clases()[0]
+
+    assert clase["audio_disponible"] is True
+    assert clase["audio_guardado"] is True
+    assert clase["audio_duracion_segundos"] == 1.0
+
+
+def test_importar_clase_copia_el_audio_y_no_depende_del_temporal(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    origen = tmp_path / "extraido_de_video.wav"
+    _wav(origen, frames=30, sample_rate=10)
+
+    carpeta = repositorio.guardar_clase(
+        "Farmacología", "Antibióticos", [], str(origen)
+    )
+    origen.unlink()
+
+    audio = repositorio.obtener_audio_clase(carpeta)
+    assert audio == carpeta / "audio.wav"
+    assert audio.exists()
+    ficha = json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))
+    assert ficha["audio_guardado"] is True
+    assert ficha["audio_duracion_segundos"] == 3.0
 
 
 def test_fallo_conserva_audio_y_se_recupera_sin_duplicar(tmp_path):

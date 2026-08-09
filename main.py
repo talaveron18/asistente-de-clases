@@ -59,6 +59,9 @@ class AsistenteClasesApp(ctk.CTk):
         self._transcripcion_incremental = None
         self._dispositivo_entrada = None
         self._dispositivos_entrada = []
+        self._opciones_microfono = {}
+        self._seleccion_microfono_manual = False
+        self._prueba_microfono_en_curso = False
         self._deteniendo_grabacion = False
         self._grabacion_pausada = False
         self._cerrando = False
@@ -264,16 +267,60 @@ class AsistenteClasesApp(ctk.CTk):
         self.materia_grabar, self.titulo_grabar = self._campos_clase(self.tab_grabar)
         panel = tarjeta(self.tab_grabar)
         panel.pack(fill="x", padx=24, pady=(0, 12))
+        panel.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
-            panel, text="Entrada automática", text_color=COLOR_TEXTO_SUAVE
-        ).pack(
-            side="left", padx=(16, 8), pady=14
+            panel, text="Micrófono", text_color=COLOR_TEXTO_SUAVE
+        ).grid(
+            row=0, column=0, padx=(16, 8), pady=(14, 6), sticky="w"
+        )
+        self.selector_microfono = ctk.CTkComboBox(
+            panel,
+            values=["Detectando entradas de Windows…"],
+            command=self._seleccionar_microfono,
+            state="readonly",
+            width=520,
+        )
+        self.selector_microfono.grid(
+            row=0, column=1, padx=6, pady=(14, 6), sticky="ew"
+        )
+        self.btn_actualizar_microfonos = ctk.CTkButton(
+            panel,
+            text="Actualizar",
+            command=lambda: self._detectar_hardware_audio(mostrar_error=True),
+            width=92,
+            fg_color="transparent",
+            border_width=1,
+            border_color=COLOR_BORDE,
+        )
+        self.btn_actualizar_microfonos.grid(
+            row=0, column=2, padx=6, pady=(14, 6)
+        )
+        self.btn_probar_microfono = ctk.CTkButton(
+            panel,
+            text="Probar",
+            command=self._probar_microfono_seleccionado,
+            width=92,
+            fg_color=COLOR_PANEL_SUAVE,
+            border_width=1,
+            border_color=COLOR_BORDE,
+        )
+        self.btn_probar_microfono.grid(
+            row=0, column=3, padx=(6, 16), pady=(14, 6)
         )
         self.etiqueta_micro = ctk.CTkLabel(
-            panel, text="Detectando hardware de audio…", anchor="w"
+            panel,
+            text="Elige una entrada y pulsa Probar mientras hablas.",
+            anchor="w",
+            text_color=COLOR_TEXTO_SUAVE,
         )
-        self.etiqueta_micro.pack(side="left", fill="x", expand=True, padx=6)
-        self._detectar_hardware_audio()
+        self.etiqueta_micro.grid(
+            row=1,
+            column=1,
+            columnspan=3,
+            padx=(6, 16),
+            pady=(0, 12),
+            sticky="ew",
+        )
 
         controles = ctk.CTkFrame(self.tab_grabar, fg_color="transparent")
         controles.pack(fill="x", padx=24)
@@ -311,7 +358,7 @@ class AsistenteClasesApp(ctk.CTk):
         ).pack(side="left", padx=8)
         ctk.CTkLabel(
             controles,
-            text="ARGOS prueba automáticamente cada entrada hasta encontrar voz.",
+            text="El selector fija la ruta exacta; ARGOS no la cambiará solo.",
             text_color=COLOR_TEXTO_SUAVE,
         ).pack(side="left", padx=8)
         fila_nivel = ctk.CTkFrame(self.tab_grabar, fg_color="transparent")
@@ -323,6 +370,7 @@ class AsistenteClasesApp(ctk.CTk):
             fila_nivel, text="Señal: 0 %", width=100, anchor="e"
         )
         self.etiqueta_nivel.pack(side="right", padx=(10, 0))
+        self._detectar_hardware_audio()
         self.progreso_grabar = ctk.CTkProgressBar(self.tab_grabar)
         self.progreso_grabar.pack(fill="x", padx=24, pady=(0, 10))
         self.progreso_grabar.set(0)
@@ -477,12 +525,15 @@ class AsistenteClasesApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
         ).pack(fill="x")
+        detalle = (
+            f"{clase.get('materia', '')}  ·  Clase {clase.get('numero', 0):03d}"
+            + (f"  ·  {fecha}" if fecha else "")
+        )
+        if clase.get("audio_disponible"):
+            detalle += "  ·  Audio guardado"
         ctk.CTkLabel(
             bloque,
-            text=(
-                f"{clase.get('materia', '')}  ·  Clase {clase.get('numero', 0):03d}"
-                + (f"  ·  {fecha}" if fecha else "")
-            ),
+            text=detalle,
             text_color=COLOR_TEXTO_SUAVE,
             font=ctk.CTkFont(size=11),
             anchor="w",
@@ -537,6 +588,15 @@ class AsistenteClasesApp(ctk.CTk):
             fg_color=COLOR_PANEL_SUAVE,
         )
         self.btn_abrir_carpeta_detalle.pack(side="right")
+        self.btn_reproducir_audio_detalle = ctk.CTkButton(
+            superior,
+            text="▶  Reproducir audio",
+            width=132,
+            height=32,
+            fg_color=COLOR_EXITO,
+            state="disabled",
+        )
+        self.btn_reproducir_audio_detalle.pack(side="right", padx=8)
         self.btn_eliminar_detalle = ctk.CTkButton(
             superior,
             text="Eliminar",
@@ -620,6 +680,26 @@ class AsistenteClasesApp(ctk.CTk):
             meta += f"  ·  Clase {int(ficha['numero']):03d}"
         if fecha:
             meta += f"  ·  {fecha}"
+        audio = None
+        try:
+            audio = self.repositorio.obtener_audio_clase(carpeta)
+        except (OSError, ValueError):
+            pass
+        if audio:
+            duracion = ficha.get("audio_duracion_segundos")
+            if isinstance(duracion, (int, float)):
+                minutos, segundos = divmod(int(round(duracion)), 60)
+                meta += f"  ·  Audio {minutos:02d}:{segundos:02d}"
+            else:
+                meta += "  ·  Audio guardado"
+            self.btn_reproducir_audio_detalle.configure(
+                state="normal",
+                command=lambda r=carpeta: self._reproducir_audio_clase(r),
+            )
+        else:
+            self.btn_reproducir_audio_detalle.configure(
+                state="disabled", command=lambda: None
+            )
         self.meta_detalle.configure(text=meta)
         self.btn_abrir_carpeta_detalle.configure(
             command=lambda r=carpeta: self.repositorio.abrir_carpeta(r)
@@ -627,6 +707,12 @@ class AsistenteClasesApp(ctk.CTk):
         self.selector_detalle.set("Resumen")
         self._mostrar_seccion_detalle("Resumen")
         self.tabs.set("Detalle de clase")
+
+    def _reproducir_audio_clase(self, ruta):
+        try:
+            self.repositorio.abrir_audio_clase(ruta)
+        except Exception as exc:
+            messagebox.showerror("Audio de la clase", str(exc))
 
     def _mostrar_seccion_detalle(self, seccion):
         if not self._ruta_detalle:
@@ -944,21 +1030,54 @@ class AsistenteClasesApp(ctk.CTk):
                 self.config_obj.sample_rate,
                 self.config_obj.dispositivo_audio,
             )
-            dispositivo = dispositivos[0]
+            indice_previo = (
+                self._dispositivo_entrada.indice
+                if self._dispositivo_entrada is not None
+                else None
+            )
+            try:
+                indice_guardado = int(self.config_obj.dispositivo_audio)
+            except (TypeError, ValueError):
+                indice_guardado = None
+            dispositivo = next(
+                (
+                    entrada
+                    for entrada in dispositivos
+                    if entrada.indice in (indice_previo, indice_guardado)
+                ),
+                dispositivos[0],
+            )
             self._dispositivos_entrada = dispositivos
             self._dispositivo_entrada = dispositivo
+            self._opciones_microfono = {
+                self._texto_opcion_microfono(entrada): entrada
+                for entrada in dispositivos
+            }
+            if hasattr(self, "selector_microfono"):
+                self.selector_microfono.configure(
+                    values=list(self._opciones_microfono), state="readonly"
+                )
+                self.selector_microfono.set(
+                    self._texto_opcion_microfono(dispositivo)
+                )
             if hasattr(self, "etiqueta_micro"):
                 self.etiqueta_micro.configure(
                     text=(
-                        f"{dispositivo.nombre} · {dispositivo.sample_rate} Hz "
-                        f"· {dispositivo.canales} canal(es) · selección automática"
+                        "Entrada seleccionada. Pulsa Probar y habla para confirmar "
+                        "que Windows entrega señal."
                     ),
-                    text_color="#4caf50",
+                    text_color=COLOR_TEXTO_SUAVE,
                 )
             return dispositivo
         except Exception as exc:
             self._dispositivos_entrada = []
             self._dispositivo_entrada = None
+            self._opciones_microfono = {}
+            if hasattr(self, "selector_microfono"):
+                self.selector_microfono.configure(
+                    values=["No hay entradas disponibles"], state="disabled"
+                )
+                self.selector_microfono.set("No hay entradas disponibles")
             if hasattr(self, "etiqueta_micro"):
                 self.etiqueta_micro.configure(
                     text="No se encontró una entrada de audio utilizable",
@@ -968,6 +1087,149 @@ class AsistenteClasesApp(ctk.CTk):
                 messagebox.showerror("Hardware de audio", str(exc))
             return None
 
+    @staticmethod
+    def _texto_opcion_microfono(entrada) -> str:
+        host = entrada.hostapi or "PortAudio"
+        return f"{entrada.nombre} · {host} · entrada #{entrada.indice}"
+
+    def _seleccionar_microfono(self, opcion: str) -> None:
+        dispositivo = self._opciones_microfono.get(opcion)
+        if dispositivo is None:
+            return
+        self._dispositivo_entrada = dispositivo
+        self._seleccion_microfono_manual = True
+        self.config_obj.dispositivo_audio = str(dispositivo.indice)
+        self.config_obj.sample_rate = dispositivo.sample_rate
+        self.config_obj.guardar()
+        self.etiqueta_micro.configure(
+            text="Entrada elegida. Pulsa Probar y habla para comprobarla.",
+            text_color=COLOR_TEXTO_SUAVE,
+        )
+        if self.grabador and self.grabador.esta_grabando():
+            self._cambiar_microfono_durante_grabacion(dispositivo)
+
+    def _probar_microfono_seleccionado(self) -> None:
+        if self._prueba_microfono_en_curso:
+            return
+        if self.grabador and self.grabador.esta_grabando():
+            self.estado.configure(
+                text="Selecciona otra entrada en la lista para cambiarla durante la grabación."
+            )
+            return
+        dispositivo = self._dispositivo_entrada
+        if dispositivo is None:
+            dispositivo = self._detectar_hardware_audio(mostrar_error=True)
+        if dispositivo is None:
+            return
+
+        self._prueba_microfono_en_curso = True
+        self._seleccion_microfono_manual = True
+        self.btn_probar_microfono.configure(state="disabled", text="Escuchando…")
+        self.btn_actualizar_microfonos.configure(state="disabled")
+        self.selector_microfono.configure(state="disabled")
+        self.nivel.set(0)
+        self.etiqueta_nivel.configure(text="Señal: 0 %")
+        self.etiqueta_micro.configure(
+            text="Habla ahora durante unos segundos…",
+            text_color=COLOR_ALERTA,
+        )
+
+        def worker():
+            try:
+                nivel = GrabadorAudio.medir_senal(
+                    dispositivo,
+                    duracion=4.0,
+                    callback_nivel=lambda valor: self._enviar_ui(
+                        self._actualizar_nivel_audio, valor
+                    ),
+                )
+                self._enviar_ui(
+                    self._fin_prueba_microfono, dispositivo, nivel, None
+                )
+            except Exception as exc:
+                self._enviar_ui(
+                    self._fin_prueba_microfono, dispositivo, 0.0, str(exc)
+                )
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="argos-prueba-manual-microfono",
+        ).start()
+
+    def _fin_prueba_microfono(
+        self, dispositivo, nivel: float, error: str | None
+    ) -> None:
+        self._prueba_microfono_en_curso = False
+        self.btn_probar_microfono.configure(state="normal", text="Probar")
+        self.btn_actualizar_microfonos.configure(state="normal")
+        self.selector_microfono.configure(state="readonly")
+        if error:
+            self.etiqueta_micro.configure(
+                text=f"Windows no pudo abrir esta entrada: {error}",
+                text_color=COLOR_PELIGRO,
+            )
+            return
+        if nivel >= UMBRAL_SENAL_UTIL:
+            self._dispositivo_entrada = dispositivo
+            self.config_obj.dispositivo_audio = str(dispositivo.indice)
+            self.config_obj.sample_rate = dispositivo.sample_rate
+            self.config_obj.guardar()
+            self.etiqueta_micro.configure(
+                text=(
+                    f"Micrófono confirmado: recibe señal ({nivel * 100:.1f} %). "
+                    "Ya puedes iniciar la grabación."
+                ),
+                text_color=COLOR_EXITO,
+            )
+        else:
+            self.etiqueta_micro.configure(
+                text=(
+                    "Esta entrada abre, pero no recibe tu voz. Elige otra en la "
+                    "lista o revisa Permisos de Windows."
+                ),
+                text_color=COLOR_PELIGRO,
+            )
+
+    def _cambiar_microfono_durante_grabacion(self, dispositivo) -> None:
+        self.etiqueta_micro.configure(
+            text=f"Cambiando a {dispositivo.nombre}…",
+            text_color=COLOR_ALERTA,
+        )
+
+        def worker():
+            cambiado = bool(
+                self.grabador
+                and self.grabador.seleccionar_entrada(dispositivo.indice)
+            )
+            error = self.grabador.ultimo_error if self.grabador else None
+            self._enviar_ui(
+                self._fin_seleccion_microfono_grabando,
+                dispositivo,
+                cambiado,
+                error,
+            )
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="argos-seleccion-manual-microfono",
+        ).start()
+
+    def _fin_seleccion_microfono_grabando(
+        self, dispositivo, cambiado: bool, error: str | None
+    ) -> None:
+        if cambiado:
+            self.etiqueta_micro.configure(
+                text=f"Grabando con {dispositivo.nombre}. Habla para verificar la señal.",
+                text_color=COLOR_EXITO,
+            )
+        else:
+            self.etiqueta_micro.configure(
+                text=f"No se pudo usar esa entrada: {error or 'error desconocido'}",
+                text_color=COLOR_PELIGRO,
+            )
+
     def _iniciar_grabacion(self):
         datos = self._datos_clase(self.materia_grabar, self.titulo_grabar)
         if not datos:
@@ -975,9 +1237,16 @@ class AsistenteClasesApp(ctk.CTk):
         if not self.transcriptor or not self.transcriptor.modelos_cargados:
             messagebox.showwarning("Modelos", "Los modelos todavía no están listos.")
             return
-        dispositivo = self._detectar_hardware_audio(mostrar_error=True)
+        dispositivo = self._dispositivo_entrada
+        if dispositivo is None:
+            dispositivo = self._detectar_hardware_audio(mostrar_error=True)
         if not dispositivo:
             return
+        candidatos = [dispositivo] + [
+            entrada
+            for entrada in self._dispositivos_entrada
+            if entrada.indice != dispositivo.indice
+        ]
         materia, titulo = datos
         try:
             carpeta = self.repositorio.iniciar_grabacion(
@@ -1001,7 +1270,7 @@ class AsistenteClasesApp(ctk.CTk):
                     "canales": entrada.canales,
                     "hostapi": entrada.hostapi,
                 }
-                for entrada in self._dispositivos_entrada
+                for entrada in candidatos
             ],
         )
 
@@ -1022,12 +1291,14 @@ class AsistenteClasesApp(ctk.CTk):
             str(carpeta / "audio.wav"),
             str(carpeta / "fragmentos_audio"),
             lambda fragmento: self._transcripcion_incremental.encolar(fragmento),
-            candidatos_entrada=self._dispositivos_entrada,
+            candidatos_entrada=candidatos,
             callback_dispositivo=lambda entrada, motivo: self._enviar_ui(
                 self._actualizar_dispositivo_grabacion, entrada, motivo
             ),
             duracion_fragmento=10.0,
             segundos_sin_senal=2.5,
+            priorizar_senal_inicial=False,
+            supervisar_entrada=False,
         )
         self._registrar_diagnostico_audio(
             "prueba_inicial_senal",
@@ -1067,6 +1338,9 @@ class AsistenteClasesApp(ctk.CTk):
         )
         self.btn_grabar.configure(state="disabled")
         self.btn_otra_entrada.configure(state="normal")
+        self.btn_probar_microfono.configure(state="disabled")
+        self.btn_actualizar_microfonos.configure(state="disabled")
+        self.selector_microfono.configure(state="readonly")
         self.btn_pausar.configure(state="normal", text="Pausar")
         self.btn_detener.configure(state="normal")
         self.estado_grabacion_global.configure(
@@ -1083,6 +1357,10 @@ class AsistenteClasesApp(ctk.CTk):
             self.etiqueta_nivel.configure(text=f"Señal: {nivel * 100:.1f} %")
 
     def _actualizar_dispositivo_grabacion(self, entrada, motivo: str) -> None:
+        self._dispositivo_entrada = entrada
+        self.config_obj.dispositivo_audio = str(entrada.indice)
+        self.config_obj.sample_rate = entrada.sample_rate
+        self.config_obj.guardar()
         self._registrar_diagnostico_audio(
             motivo,
             indice=entrada.indice,
@@ -1100,6 +1378,16 @@ class AsistenteClasesApp(ctk.CTk):
             ),
             text_color="#4caf50" if motivo != "sin_senal" else "#ef5350",
         )
+        opcion = next(
+            (
+                texto
+                for texto, candidato in self._opciones_microfono.items()
+                if candidato.indice == entrada.indice
+            ),
+            None,
+        )
+        if opcion:
+            self.selector_microfono.set(opcion)
         if motivo == "cambio_automatico":
             self.estado.configure(
                 text=(
@@ -1110,6 +1398,10 @@ class AsistenteClasesApp(ctk.CTk):
         elif motivo == "cambio_manual":
             self.estado.configure(
                 text=f"Probando manualmente {entrada.nombre}. Habla ahora."
+            )
+        elif motivo == "seleccion_manual":
+            self.estado.configure(
+                text=f"Entrada fijada en {entrada.nombre}. Habla para verificarla."
             )
         elif motivo == "sin_senal":
             self.estado.configure(
@@ -1141,6 +1433,7 @@ class AsistenteClasesApp(ctk.CTk):
             self._grabacion_pausada = False
             self.btn_pausar.configure(text="Pausar")
             self.btn_otra_entrada.configure(state="normal")
+            self.selector_microfono.configure(state="readonly")
             self.estado_grabacion_global.configure(
                 text="●  Grabando", text_color=COLOR_PELIGRO
             )
@@ -1151,6 +1444,7 @@ class AsistenteClasesApp(ctk.CTk):
             self._grabacion_pausada = True
             self.btn_pausar.configure(text="Reanudar")
             self.btn_otra_entrada.configure(state="disabled")
+            self.selector_microfono.configure(state="disabled")
             self.nivel.set(0)
             self.etiqueta_nivel.configure(text="Señal: en pausa")
             self.estado_grabacion_global.configure(
@@ -1321,6 +1615,9 @@ class AsistenteClasesApp(ctk.CTk):
     def _restablecer_controles_grabacion(self):
         self.btn_grabar.configure(state="normal")
         self.btn_otra_entrada.configure(state="disabled", text="Probar otra entrada")
+        self.btn_probar_microfono.configure(state="normal", text="Probar")
+        self.btn_actualizar_microfonos.configure(state="normal")
+        self.selector_microfono.configure(state="readonly")
         self.btn_pausar.configure(state="disabled", text="Pausar")
         self.btn_detener.configure(state="disabled", text="Detener y guardar")
         self.estado_grabacion_global.configure(
@@ -1405,7 +1702,10 @@ class AsistenteClasesApp(ctk.CTk):
                     min_hablantes=self.config_obj.min_hablantes,
                     max_hablantes=self.config_obj.max_hablantes,
                 )
-                fuente_archivable = ruta if tipo_original == "audio" else None
+                # Si el origen era un vídeo, ``ruta_procesable`` es el WAV
+                # temporal extraído por FFmpeg. Se copia antes de eliminarlo
+                # para que toda clase conserve siempre su fuente de audio.
+                fuente_archivable = ruta if tipo_original == "audio" else ruta_procesable
                 carpeta = self.repositorio.guardar_clase(materia, titulo, segmentos, fuente_archivable)
                 self.config_obj.ultima_materia = materia
                 self.config_obj.guardar()
@@ -1441,7 +1741,17 @@ class AsistenteClasesApp(ctk.CTk):
         self.progreso_archivo.set(0)
         self.estado.configure(text=f"Clase guardada: {carpeta}")
         self._refrescar_clases()
-        messagebox.showinfo("Clase guardada", f"Se ha archivado correctamente en:\n{carpeta}")
+        audio = self.repositorio.obtener_audio_clase(carpeta)
+        mensaje_audio = (
+            "\n\nEl audio completo también está guardado y puede reproducirse "
+            "desde «Mis clases»."
+            if audio
+            else ""
+        )
+        messagebox.showinfo(
+            "Clase guardada",
+            f"Se ha archivado correctamente en:\n{carpeta}{mensaje_audio}",
+        )
 
     def _guardar_config(self):
         self.config_obj.hf_token = self.token.get().strip()

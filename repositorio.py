@@ -40,6 +40,29 @@ def _escribir_json_atomico(ruta: Path, datos: dict | list) -> None:
     )
 
 
+def _metadatos_archivo_audio(ruta: Path) -> dict:
+    """Describe un audio conservado sin depender de FFmpeg ni del transcriptor."""
+    if not ruta.is_file() or ruta.stat().st_size <= 44:
+        return {}
+    datos = {
+        "audio": ruta.name,
+        "audio_guardado": True,
+        "audio_bytes": ruta.stat().st_size,
+    }
+    if ruta.suffix.casefold() == ".wav":
+        try:
+            with wave.open(str(ruta), "rb") as archivo:
+                frecuencia = archivo.getframerate()
+                datos["audio_sample_rate"] = frecuencia
+                if frecuencia > 0:
+                    datos["audio_duracion_segundos"] = round(
+                        archivo.getnframes() / frecuencia, 3
+                    )
+        except (OSError, wave.Error, ZeroDivisionError):
+            pass
+    return datos
+
+
 def _texto_normalizado(texto: str) -> str:
     return re.sub(r"\W+", " ", (texto or "").casefold()).strip()
 
@@ -331,6 +354,7 @@ class RepositorioClases:
             ficha_path = carpeta / "ficha.json"
             ficha = json.loads(ficha_path.read_text(encoding="utf-8"))
             ficha["segmentos"] = len(segmentos)
+            ficha.update(_metadatos_archivo_audio(carpeta / "audio.wav"))
             _escribir_json_atomico(ficha_path, ficha)
         return segmentos
 
@@ -403,8 +427,42 @@ class RepositorioClases:
             "segmentos": len(segmentos),
             "audio": audio_destino.name if audio_destino else None,
         }
+        if audio_destino:
+            ficha.update(_metadatos_archivo_audio(audio_destino))
         _escribir_json_atomico(carpeta_clase / "ficha.json", ficha)
         return carpeta_clase
+
+    @staticmethod
+    def _localizar_audio_en_carpeta(carpeta: Path, ficha: dict) -> Path | None:
+        nombre = ficha.get("audio")
+        candidatos = []
+        if isinstance(nombre, str) and nombre.strip():
+            candidatos.append(carpeta / Path(nombre).name)
+        candidatos.extend(sorted(carpeta.glob("audio.*")))
+        vistos = set()
+        for candidato in candidatos:
+            clave = str(candidato).casefold()
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            if candidato.is_file() and candidato.stat().st_size > 44:
+                return candidato
+        return None
+
+    def obtener_audio_clase(self, ruta: str | Path) -> Path | None:
+        """Localiza el audio de una clase, incluidas grabaciones antiguas."""
+        carpeta = self._resolver_clase(ruta)
+        try:
+            ficha = json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            ficha = {}
+        return self._localizar_audio_en_carpeta(carpeta, ficha)
+
+    def abrir_audio_clase(self, ruta: str | Path) -> None:
+        audio = self.obtener_audio_clase(ruta)
+        if audio is None:
+            raise FileNotFoundError("Esta clase no tiene un audio guardado.")
+        os.startfile(audio)
 
     def listar_clases(self, filtro: str = "") -> list[dict]:
         filtro = filtro.casefold().strip()
@@ -419,6 +477,10 @@ class RepositorioClases:
                 except (OSError, json.JSONDecodeError):
                     continue
                 ficha["ruta"] = str(carpeta)
+                audio = self._localizar_audio_en_carpeta(carpeta, ficha)
+                ficha["audio_disponible"] = audio is not None
+                if audio:
+                    ficha.update(_metadatos_archivo_audio(audio))
                 texto = f"{ficha.get('materia', '')} {ficha.get('titulo', '')} {ficha.get('fecha_iso', '')}".casefold()
                 if not filtro or filtro in texto:
                     clases.append(ficha)

@@ -408,6 +408,7 @@ class GrabadorAudio:
         entrada: DispositivoEntrada,
         duracion: float = 0.35,
         sd=None,
+        callback_nivel: Optional[Callable[[float], None]] = None,
     ) -> float:
         """Abre brevemente una ruta y devuelve su nivel máximo real.
 
@@ -425,6 +426,11 @@ class GrabadorAudio:
             _, _, rms = GrabadorAudio._canal_con_mas_senal(indata)
             nivel = min(rms / 32768.0 * 5.0, 1.0)
             nivel_maximo = max(nivel_maximo, nivel)
+            if callback_nivel:
+                try:
+                    callback_nivel(nivel)
+                except Exception:
+                    pass
             if nivel >= UMBRAL_SENAL_UTIL:
                 hay_senal.set()
 
@@ -500,6 +506,8 @@ class GrabadorAudio:
         duracion_fragmento: float = 10.0,
         solapamiento_fragmento: float = 1.0,
         segundos_sin_senal: float = 4.0,
+        priorizar_senal_inicial: bool = True,
+        supervisar_entrada: bool = True,
     ) -> bool:
         if self.is_recording:
             return False
@@ -566,7 +574,8 @@ class GrabadorAudio:
             sd = _sounddevice()
             self._sd = sd
             self._callback_nivel = callback_nivel
-            self._priorizar_entrada_con_senal(sd)
+            if priorizar_senal_inicial:
+                self._priorizar_entrada_con_senal(sd)
             self._indice_candidato = 0
             self._wav = wave.open(self._archivo_salida, "wb")
             self._wav.setnchannels(1)
@@ -580,13 +589,14 @@ class GrabadorAudio:
                 self._candidatos_entrada[0],
                 callback_nivel,
             )
-            self._hilo_supervision = threading.Thread(
-                target=self._supervisar_entrada,
-                args=(sd, callback_nivel, max(0.25, segundos_sin_senal)),
-                daemon=True,
-                name="argos-supervision-microfono",
-            )
-            self._hilo_supervision.start()
+            if supervisar_entrada:
+                self._hilo_supervision = threading.Thread(
+                    target=self._supervisar_entrada,
+                    args=(sd, callback_nivel, max(0.25, segundos_sin_senal)),
+                    daemon=True,
+                    name="argos-supervision-microfono",
+                )
+                self._hilo_supervision.start()
             return True
         except Exception as exc:
             self.ultimo_error = str(exc)
@@ -849,6 +859,49 @@ class GrabadorAudio:
             "cambio_manual",
             reiniciar_si_agotado=True,
         )
+
+    def seleccionar_entrada(self, indice: int) -> bool:
+        """Cambia directamente a la entrada elegida por el usuario.
+
+        PortAudio puede publicar un mismo periférico mediante varias rutas.
+        El índice identifica la ruta exacta que el usuario acaba de probar en
+        la interfaz, sin volver a aplicar heurísticas de nombre o prioridad.
+        """
+        if not self.is_recording or self.is_paused or self._sd is None:
+            return False
+        if not self._cambio_entrada_lock.acquire(blocking=False):
+            return False
+        try:
+            posicion = next(
+                (
+                    i
+                    for i, entrada in enumerate(self._candidatos_entrada)
+                    if entrada.indice == int(indice)
+                ),
+                None,
+            )
+            if posicion is None:
+                self.ultimo_error = f"La entrada {indice} ya no está disponible."
+                return False
+            entrada = self._candidatos_entrada[posicion]
+            if (
+                self._dispositivo_activo is not None
+                and self._dispositivo_activo.indice == entrada.indice
+            ):
+                return True
+            self._cerrar_stream()
+            if not self.is_recording:
+                return False
+            try:
+                self._abrir_stream(self._sd, entrada, self._callback_nivel)
+            except Exception as exc:
+                self.ultimo_error = f"{entrada.nombre}: {exc}"
+                return False
+            self._indice_candidato = posicion
+            self._avisar_dispositivo(entrada, "seleccion_manual")
+            return True
+        finally:
+            self._cambio_entrada_lock.release()
 
     def _avisar_dispositivo(self, entrada: DispositivoEntrada, motivo: str) -> None:
         if self._callback_dispositivo:
