@@ -122,7 +122,9 @@ class AsistenteClasesApp(ctk.CTk):
         self._cargar_modelos()
 
     def _crear_interfaz(self):
+        registrar_diagnostico_arranque("interfaz_navegacion")
         self.tabs = NavegacionArgos(self)
+        registrar_diagnostico_arranque("interfaz_paginas")
         self.tab_inicio = self.tabs.add("Inicio")
         self.tab_grabar = self.tabs.add("Grabar clase")
         self.tab_archivo = self.tabs.add("Importar archivo")
@@ -131,6 +133,7 @@ class AsistenteClasesApp(ctk.CTk):
         self.tab_medica = self.tabs.add("Biblioteca")
         self.tab_config = self.tabs.add("Configuración")
 
+        registrar_diagnostico_arranque("interfaz_cabecera")
         estado_superior = ctk.CTkFrame(
             self.tabs.cabecera, fg_color="transparent"
         )
@@ -181,14 +184,22 @@ class AsistenteClasesApp(ctk.CTk):
         )
         self.estado_grabacion_global.pack(side="right", padx=(0, 12))
 
+        registrar_diagnostico_arranque("interfaz_inicio")
         self._tab_inicio()
+        registrar_diagnostico_arranque("interfaz_grabacion")
         self._tab_grabacion()
+        registrar_diagnostico_arranque("interfaz_importacion")
         self._tab_archivo_multimedia()
+        registrar_diagnostico_arranque("interfaz_clases")
         self._tab_biblioteca_clases()
+        registrar_diagnostico_arranque("interfaz_detalle")
         self._tab_detalle_clase()
+        registrar_diagnostico_arranque("interfaz_biblioteca")
         self._tab_biblioteca_medica()
+        registrar_diagnostico_arranque("interfaz_configuracion")
         self._tab_configuracion()
 
+        registrar_diagnostico_arranque("interfaz_pie")
         self.estado = ctk.CTkLabel(
             self.tabs.menu_pie,
             text="Inicializando…",
