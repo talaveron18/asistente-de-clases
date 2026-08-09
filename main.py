@@ -756,6 +756,7 @@ class AsistenteClasesApp(ctk.CTk):
         )
         self.btn_copiar_detalle.pack(side="right")
 
+        registrar_diagnostico_arranque("detalle_selector")
         self.selector_detalle = ctk.CTkSegmentedButton(
             self.tab_detalle,
             values=[
@@ -771,6 +772,7 @@ class AsistenteClasesApp(ctk.CTk):
             selected_hover_color=COLOR_ACENTO,
         )
         self.selector_detalle.pack(fill="x", padx=24, pady=(0, 10))
+        registrar_diagnostico_arranque("detalle_texto")
         self.texto_detalle = ctk.CTkTextbox(
             self.tab_detalle,
             font=ctk.CTkFont(size=14),
@@ -780,14 +782,15 @@ class AsistenteClasesApp(ctk.CTk):
             wrap="word",
         )
         self.texto_detalle.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        registrar_diagnostico_arranque("detalle_estilos")
         self.texto_detalle.tag_config(
-            "titulo1", foreground=COLOR_TEXTO, font=("Segoe UI", 20, "bold"), spacing1=12, spacing3=8
+            "titulo1", foreground=COLOR_TEXTO, spacing1=12, spacing3=8
         )
         self.texto_detalle.tag_config(
-            "titulo2", foreground=COLOR_ACENTO, font=("Segoe UI", 16, "bold"), spacing1=12, spacing3=6
+            "titulo2", foreground=COLOR_ACENTO, spacing1=12, spacing3=6
         )
         self.texto_detalle.tag_config(
-            "titulo3", foreground=COLOR_TEXTO, font=("Segoe UI", 14, "bold"), spacing1=8, spacing3=4
+            "titulo3", foreground=COLOR_TEXTO, spacing1=8, spacing3=4
         )
         self.texto_detalle.tag_config(
             "nota", foreground=COLOR_TEXTO_SUAVE, lmargin1=14, lmargin2=14, spacing3=5
@@ -799,8 +802,9 @@ class AsistenteClasesApp(ctk.CTk):
             "lista", foreground=COLOR_TEXTO, lmargin1=12, lmargin2=26, spacing3=3
         )
         self.texto_detalle.tag_config(
-            "pregunta", foreground=COLOR_ALERTA, font=("Segoe UI", 13, "bold"), spacing3=4
+            "pregunta", foreground=COLOR_ALERTA, spacing3=4
         )
+        registrar_diagnostico_arranque("detalle_listo")
         self._contenido_detalle_actual = ""
         self._ruta_detalle = None
 
