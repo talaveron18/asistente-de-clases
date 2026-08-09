@@ -4,6 +4,7 @@ import threading
 from types import SimpleNamespace
 from pathlib import Path
 
+from grabador import DispositivoEntrada, GrabadorAudio
 from interfaz_argos import (
     ARCHIVOS_MATERIAL_COMPLETO,
     NavegacionArgos,
@@ -174,6 +175,58 @@ def test_arranque_de_whisper_deja_diagnostico_sin_simular_exito(
 
     resultado = json.loads(listo.read_text(encoding="utf-8"))
     assert resultado == {"modelos_cargados": True, "detalle": "Listo · CPU"}
+
+
+def test_deteccion_inicial_de_audio_no_bloquea_la_interfaz(monkeypatch):
+    iniciado = threading.Event()
+    liberar = threading.Event()
+    terminado = threading.Event()
+    encolado = threading.Event()
+    eventos_ui = []
+
+    def detectar(*_args):
+        iniciado.set()
+        liberar.wait(timeout=2)
+        terminado.set()
+        return [DispositivoEntrada(3, "Micrófono Realtek", 48000, 1, "WASAPI")]
+
+    class Control:
+        def configure(self, **_kwargs):
+            pass
+
+        def set(self, _valor):
+            pass
+
+    monkeypatch.setattr(
+        GrabadorAudio, "detectar_dispositivos_entrada", detectar
+    )
+    def aplicar(dispositivos):
+        return dispositivos
+
+    def aplicar_error(_error, _mostrar):
+        raise AssertionError("La detección de prueba no debe fallar")
+
+    app = SimpleNamespace(
+        selector_microfono=Control(),
+        etiqueta_micro=Control(),
+        config_obj=SimpleNamespace(sample_rate=16000, dispositivo_audio=""),
+        _aplicar_dispositivos_audio=aplicar,
+        _aplicar_error_dispositivos_audio=aplicar_error,
+        _enviar_ui=lambda callback, *args: (
+            eventos_ui.append((callback, args)), encolado.set()
+        ),
+    )
+
+    AsistenteClasesApp._detectar_hardware_audio_async(app)
+
+    assert iniciado.wait(timeout=1)
+    assert eventos_ui == []
+    liberar.set()
+    assert terminado.wait(timeout=1)
+    assert encolado.wait(timeout=1)
+    for callback, args in eventos_ui:
+        assert callback is aplicar
+        assert args[0][0].nombre == "Micrófono Realtek"
 
 
 def test_markdown_se_muestra_sin_marcas_tecnicas():

@@ -112,6 +112,7 @@ class AsistenteClasesApp(ctk.CTk):
         # workers publican eventos en una cola que se vacía a ritmo limitado;
         # así el callback de PortAudio no fuerza redibujados concurrentes.
         self._bucle_ui_after = self.after(50, self._procesar_cola_ui)
+        self._detectar_hardware_audio_async()
         if self.biblioteca_medica.interrumpidos_recuperados:
             total = self.biblioteca_medica.interrumpidos_recuperados
             self.estado_documentos.configure(
@@ -331,7 +332,9 @@ class AsistenteClasesApp(ctk.CTk):
         self.btn_actualizar_microfonos = ctk.CTkButton(
             panel,
             text="Actualizar",
-            command=lambda: self._detectar_hardware_audio(mostrar_error=True),
+            command=lambda: self._detectar_hardware_audio_async(
+                mostrar_error=True
+            ),
             width=92,
             fg_color="transparent",
             border_width=1,
@@ -415,7 +418,6 @@ class AsistenteClasesApp(ctk.CTk):
             fila_nivel, text="Señal: 0 %", width=100, anchor="e"
         )
         self.etiqueta_nivel.pack(side="right", padx=(10, 0))
-        self._detectar_hardware_audio()
         self.progreso_grabar = ctk.CTkProgressBar(self.tab_grabar)
         self.progreso_grabar.pack(fill="x", padx=24, pady=(0, 10))
         self.progreso_grabar.set(0)
@@ -1280,62 +1282,107 @@ class AsistenteClasesApp(ctk.CTk):
                 self.config_obj.sample_rate,
                 self.config_obj.dispositivo_audio,
             )
-            indice_previo = (
-                self._dispositivo_entrada.indice
-                if self._dispositivo_entrada is not None
-                else None
-            )
-            try:
-                indice_guardado = int(self.config_obj.dispositivo_audio)
-            except (TypeError, ValueError):
-                indice_guardado = None
-            dispositivo = next(
-                (
-                    entrada
-                    for entrada in dispositivos
-                    if entrada.indice in (indice_previo, indice_guardado)
-                ),
-                dispositivos[0],
-            )
-            self._dispositivos_entrada = dispositivos
-            self._dispositivo_entrada = dispositivo
-            self._opciones_microfono = {
-                self._texto_opcion_microfono(entrada): entrada
-                for entrada in dispositivos
-            }
-            if hasattr(self, "selector_microfono"):
-                self.selector_microfono.configure(
-                    values=list(self._opciones_microfono), state="readonly"
-                )
-                self.selector_microfono.set(
-                    self._texto_opcion_microfono(dispositivo)
-                )
-            if hasattr(self, "etiqueta_micro"):
-                self.etiqueta_micro.configure(
-                    text=(
-                        "Entrada seleccionada. Pulsa Probar y habla para confirmar "
-                        "que Windows entrega señal."
-                    ),
-                    text_color=COLOR_TEXTO_SUAVE,
-                )
-            return dispositivo
+            return self._aplicar_dispositivos_audio(dispositivos)
         except Exception as exc:
-            self._dispositivos_entrada = []
-            self._dispositivo_entrada = None
-            self._opciones_microfono = {}
-            if hasattr(self, "selector_microfono"):
-                self.selector_microfono.configure(
-                    values=["No hay entradas disponibles"], state="disabled"
-                )
-                self.selector_microfono.set("No hay entradas disponibles")
-            if hasattr(self, "etiqueta_micro"):
-                self.etiqueta_micro.configure(
-                    text="No se encontró una entrada de audio utilizable",
-                    text_color="#ef5350",
-                )
-            if mostrar_error:
-                messagebox.showerror("Hardware de audio", str(exc))
+            self._aplicar_error_dispositivos_audio(str(exc), mostrar_error)
             return None
+
+    def _detectar_hardware_audio_async(
+        self, mostrar_error: bool = False
+    ) -> None:
+        """Enumera PortAudio sin bloquear la construcción ni el repintado."""
+        if hasattr(self, "selector_microfono"):
+            self.selector_microfono.configure(
+                values=["Detectando entradas de Windows…"], state="disabled"
+            )
+            self.selector_microfono.set("Detectando entradas de Windows…")
+        if hasattr(self, "etiqueta_micro"):
+            self.etiqueta_micro.configure(
+                text="Consultando los dispositivos de entrada de Windows…",
+                text_color=COLOR_TEXTO_SUAVE,
+            )
+
+        def worker():
+            try:
+                dispositivos = GrabadorAudio.detectar_dispositivos_entrada(
+                    self.config_obj.sample_rate,
+                    self.config_obj.dispositivo_audio,
+                )
+                self._enviar_ui(
+                    self._aplicar_dispositivos_audio, dispositivos
+                )
+            except Exception as exc:
+                self._enviar_ui(
+                    self._aplicar_error_dispositivos_audio,
+                    str(exc),
+                    mostrar_error,
+                )
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="argos-deteccion-audio",
+        ).start()
+
+    def _aplicar_dispositivos_audio(self, dispositivos):
+        indice_previo = (
+            self._dispositivo_entrada.indice
+            if self._dispositivo_entrada is not None
+            else None
+        )
+        try:
+            indice_guardado = int(self.config_obj.dispositivo_audio)
+        except (TypeError, ValueError):
+            indice_guardado = None
+        dispositivo = next(
+            (
+                entrada
+                for entrada in dispositivos
+                if entrada.indice in (indice_previo, indice_guardado)
+            ),
+            dispositivos[0],
+        )
+        self._dispositivos_entrada = dispositivos
+        self._dispositivo_entrada = dispositivo
+        self._opciones_microfono = {
+            self._texto_opcion_microfono(entrada): entrada
+            for entrada in dispositivos
+        }
+        if hasattr(self, "selector_microfono"):
+            self.selector_microfono.configure(
+                values=list(self._opciones_microfono), state="readonly"
+            )
+            self.selector_microfono.set(
+                self._texto_opcion_microfono(dispositivo)
+            )
+        if hasattr(self, "etiqueta_micro"):
+            self.etiqueta_micro.configure(
+                text=(
+                    "Entrada seleccionada. Pulsa Probar y habla para confirmar "
+                    "que Windows entrega señal."
+                ),
+                text_color=COLOR_TEXTO_SUAVE,
+            )
+        return dispositivo
+
+    def _aplicar_error_dispositivos_audio(
+        self, error: str, mostrar_error: bool = False
+    ) -> None:
+        self._dispositivos_entrada = []
+        self._dispositivo_entrada = None
+        self._opciones_microfono = {}
+        if hasattr(self, "selector_microfono"):
+            self.selector_microfono.configure(
+                values=["No hay entradas disponibles"], state="disabled"
+            )
+            self.selector_microfono.set("No hay entradas disponibles")
+        if hasattr(self, "etiqueta_micro"):
+            self.etiqueta_micro.configure(
+                text="No se encontró una entrada de audio utilizable",
+                text_color="#ef5350",
+            )
+        if mostrar_error:
+            messagebox.showerror("Hardware de audio", error)
 
     @staticmethod
     def _texto_opcion_microfono(entrada) -> str:
