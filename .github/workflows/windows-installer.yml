@@ -130,7 +130,7 @@ jobs:
           }
 
           $documento = Join-Path $env:RUNNER_TEMP "argos-documento-prueba.txt"
-          "Texto médico de prueba para validar la biblioteca de ARGOS." | `
+          "El shock causa hipoperfusión tisular y puede elevar el lactato por metabolismo anaerobio." | `
             Set-Content -Path $documento -Encoding utf8
           $env:ARGOS_SELFTEST_AUDIO = $audio
           $env:ARGOS_SELFTEST_VIDEO = $video
@@ -152,8 +152,13 @@ jobs:
           }
           if ($resultado.audio_segmentos -lt 1 `
               -or $resultado.video_segmentos -lt 1 `
-              -or $resultado.documento_caracteres -lt 1) {
-            throw "El ejecutable no procesó los tres archivos reales"
+              -or $resultado.documento_caracteres -lt 1 `
+              -or -not $resultado.pipeline_ok `
+              -or $resultado.pipeline_archivos -lt 9 `
+              -or $resultado.pipeline_bloques -lt 1 `
+              -or $resultado.pipeline_flashcards -lt 1 `
+              -or $resultado.pipeline_referencias -lt 1) {
+            throw "El ejecutable no completó audio, vídeo, documento y pipeline médico"
           }
 
       - name: Instalar Inno Setup
