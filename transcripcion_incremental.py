@@ -1,6 +1,7 @@
 """Cola durable de transcripción mientras el micrófono sigue grabando."""
 from __future__ import annotations
 
+import inspect
 import queue
 import json
 import threading
@@ -43,6 +44,8 @@ class TranscripcionIncremental:
         consolidar_audio_completo: bool = False,
         min_hablantes: int = 2,
         max_hablantes: int = 10,
+        materia: str = "",
+        titulo: str = "",
     ):
         self.transcriptor = transcriptor
         self.repositorio = repositorio
@@ -52,6 +55,10 @@ class TranscripcionIncremental:
         self.consolidar_audio_completo = consolidar_audio_completo
         self.min_hablantes = min_hablantes
         self.max_hablantes = max_hablantes
+        self._contexto_clase = " · ".join(
+            parte.strip() for parte in (materia, titulo) if parte and parte.strip()
+        )
+        self._contexto_directo = ""
         self._cola: queue.Queue[FragmentoAudio | None] = queue.Queue()
         self._errores: list[str] = []
         self._cerrada = False
@@ -123,12 +130,16 @@ class TranscripcionIncremental:
             self._estado(f"Transcripción definitiva: {mensaje}")
 
         try:
-            finales = self.transcriptor.transcribir_archivo(
-                str(audio),
-                callback_progreso=progreso,
-                min_hablantes=self.min_hablantes,
-                max_hablantes=self.max_hablantes,
-            )
+            opciones = {
+                "callback_progreso": progreso,
+                "min_hablantes": self.min_hablantes,
+                "max_hablantes": self.max_hablantes,
+            }
+            if self._acepta_parametro(
+                self.transcriptor.transcribir_archivo, "contexto_clase"
+            ):
+                opciones["contexto_clase"] = self._contexto_clase
+            finales = self.transcriptor.transcribir_archivo(str(audio), **opciones)
         except Exception as exc:
             self._errores.append(f"Transcripción definitiva: {exc}")
             self._estado(
@@ -170,7 +181,13 @@ class TranscripcionIncremental:
         ultimo_error = None
         for _intento in range(2):
             try:
-                locales = self.transcriptor.transcribir_fragmento(fragmento.ruta)
+                opciones = {}
+                metodo = self.transcriptor.transcribir_fragmento
+                if self._acepta_parametro(metodo, "contexto_clase"):
+                    opciones["contexto_clase"] = self._contexto_clase
+                if self._acepta_parametro(metodo, "contexto_previo"):
+                    opciones["contexto_previo"] = self._contexto_directo
+                locales = metodo(fragmento.ruta, **opciones)
                 segmentos = [
                     SegmentoTranscrito(
                         inicio=segmento.inicio + fragmento.inicio,
@@ -190,6 +207,16 @@ class TranscripcionIncremental:
                 )
                 if self.callback_segmentos:
                     self.callback_segmentos(todos)
+                texto_nuevo = " ".join(
+                    segmento.texto.strip()
+                    for segmento in segmentos
+                    if segmento.texto.strip()
+                )
+                if texto_nuevo:
+                    acumulado = " ".join(
+                        f"{self._contexto_directo} {texto_nuevo}".split()
+                    )
+                    self._contexto_directo = acumulado[-260:]
                 self._estado(
                     f"Transcripción guardada hasta {fragmento.fin:.0f} s. "
                     "La grabación continúa."
@@ -203,6 +230,18 @@ class TranscripcionIncremental:
         self._estado(
             "No se pudo transcribir este fragmento; el audio está protegido. "
             f"Detalle: {ultimo_error}"
+        )
+
+    @staticmethod
+    def _acepta_parametro(metodo, nombre: str) -> bool:
+        """Mantiene compatibles los transcriptores antiguos y los dobles de prueba."""
+        try:
+            parametros = inspect.signature(metodo).parameters
+        except (TypeError, ValueError):
+            return False
+        return nombre in parametros or any(
+            parametro.kind is inspect.Parameter.VAR_KEYWORD
+            for parametro in parametros.values()
         )
 
     def _registrar_error(self, fragmento: FragmentoAudio, error: Exception) -> None:

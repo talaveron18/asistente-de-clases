@@ -98,6 +98,10 @@ También puede utilizarse `EJECUTAR.bat`.
 - Pausa, reanudación y cierre seguro de una grabación sin fragmentar la clase.
 - Transcripción incremental cada pocos segundos con guardado atómico durante
   la grabación; no espera al final de la clase.
+- Perfil lingüístico de Medicina en español rioplatense de Argentina, con la
+  materia, el título y el final del fragmento anterior como contexto.
+- Selección y copia del texto mientras la grabación continúa, sin perder la
+  selección ni saltar al final cuando llega un nuevo fragmento.
 - Transcripción presentada en párrafos continuos y limpieza de las palabras
   repetidas por el solapamiento entre fragmentos.
 - Fragmentos de audio recuperables y reanudación automática tras un cierre

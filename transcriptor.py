@@ -9,6 +9,33 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
 
+CONTEXTO_MEDICINA_ARGENTINA = (
+    "Clase universitaria de Medicina en español rioplatense de Argentina. "
+    "Terminología médica precisa: anatomía, fisiología, fisiopatología, "
+    "microbiología, inmunología, patología, farmacología, diagnóstico, "
+    "tratamiento, signos y síntomas."
+)
+MAX_CARACTERES_CONTEXTO = 260
+
+
+def construir_prompt_transcripcion(contexto_clase: str = "", contexto_previo: str = "") -> str:
+    """Crea un contexto breve para Whisper sin consumir su ventana de texto.
+
+    El prompt no reescribe el habla del docente: fija la variedad de español y
+    el dominio léxico. El final ya reconocido ayuda a resolver términos que
+    quedan cortados entre dos fragmentos de audio.
+    """
+    contexto = " ".join(f"{contexto_clase} {contexto_previo}".split()).strip()
+    if len(contexto) > MAX_CARACTERES_CONTEXTO:
+        contexto = contexto[-MAX_CARACTERES_CONTEXTO:]
+        primer_espacio = contexto.find(" ")
+        if primer_espacio >= 0:
+            contexto = contexto[primer_espacio + 1 :]
+    if contexto:
+        return f"{CONTEXTO_MEDICINA_ARGENTINA} Contexto de la clase: {contexto}"
+    return CONTEXTO_MEDICINA_ARGENTINA
+
+
 def _ffmpeg_executable() -> str:
     """Localiza FFmpeg incluido en el instalador o disponible en el PATH."""
     candidatos = []
@@ -202,7 +229,14 @@ class TranscriptorClases:
                         f"por CPU. GPU: {error_gpu}. CPU: {error_cpu}"
                     ) from error_cpu
 
-    def transcribir_archivo(self, archivo_audio: str, callback_progreso=None, min_hablantes: int = 2, max_hablantes: int = 10):
+    def transcribir_archivo(
+        self,
+        archivo_audio: str,
+        callback_progreso=None,
+        min_hablantes: int = 2,
+        max_hablantes: int = 10,
+        contexto_clase: str = "",
+    ):
         if not self.modelos_cargados or self.whisper_model is None:
             raise RuntimeError("Los modelos no están cargados.")
         if not os.path.isfile(archivo_audio):
@@ -217,10 +251,12 @@ class TranscriptorClases:
         segmentos_whisper, _info = self._inferir(
             archivo_audio,
             language=language,
-            beam_size=3,
+            beam_size=5,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
             condition_on_previous_text=True,
+            initial_prompt=construir_prompt_transcripcion(contexto_clase),
+            temperature=0.0,
         )
         if not segmentos_whisper:
             return []
@@ -246,7 +282,12 @@ class TranscriptorClases:
         prog("Transcripción completada.", 1.0)
         return self._asignar_roles(self._fusionar(segmentos_whisper, turnos))
 
-    def transcribir_fragmento(self, archivo_audio: str):
+    def transcribir_fragmento(
+        self,
+        archivo_audio: str,
+        contexto_clase: str = "",
+        contexto_previo: str = "",
+    ):
         """Transcribe un fragmento corto sin bloquear la captura de audio.
 
         La diarización se reserva al procesamiento posterior. Ejecutarla cada
@@ -264,6 +305,10 @@ class TranscriptorClases:
             "vad_filter": True,
             "vad_parameters": {"min_silence_duration_ms": 350},
             "condition_on_previous_text": False,
+            "initial_prompt": construir_prompt_transcripcion(
+                contexto_clase, contexto_previo
+            ),
+            "temperature": 0.0,
         }
         segmentos_iter, _info = self._inferir(archivo_audio, **opciones)
         # En micrófonos con ganancia baja, Silero puede considerar silencioso
@@ -273,7 +318,7 @@ class TranscriptorClases:
             opciones["vad_filter"] = False
             opciones.pop("vad_parameters", None)
             segmentos_iter, _info = self._inferir(archivo_audio, **opciones)
-        return [
+        resultado = [
             SegmentoTranscrito(
                 segmento.start,
                 segmento.end,
@@ -283,6 +328,7 @@ class TranscriptorClases:
             )
             for segmento in segmentos_iter
         ]
+        return resultado
 
     @staticmethod
     def _fusionar(segmentos_whisper, turnos):

@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import Menu, filedialog, messagebox, simpledialog
 
 import customtkinter as ctk
 
@@ -38,6 +38,7 @@ from media_utils import eliminar_temporal, preparar_para_transcripcion, tipo_arc
 from repositorio import RepositorioClases, formatear_transcripcion_continua
 from transcriptor import TranscriptorClases
 from transcripcion_incremental import ResultadoGrabacion, TranscripcionIncremental
+from texto_en_directo import actualizar_texto, copiar_texto, hay_seleccion
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -99,6 +100,7 @@ class AsistenteClasesApp(ctk.CTk):
         self._grabacion_pausada = False
         self._cerrando = False
         self._recuperacion_grabaciones_activa = False
+        self._texto_grabar_renderizado = ""
         self._hilo_ui = threading.get_ident()
         self._cola_ui: queue.SimpleQueue[tuple[object, tuple]] = queue.SimpleQueue()
         self._bucle_ui_after = None
@@ -432,13 +434,28 @@ class AsistenteClasesApp(ctk.CTk):
         self.progreso_grabar = ctk.CTkProgressBar(self.tab_grabar)
         self.progreso_grabar.pack(fill="x", padx=24, pady=(0, 10))
         self.progreso_grabar.set(0)
+        cabecera_transcripcion = ctk.CTkFrame(
+            self.tab_grabar, fg_color="transparent"
+        )
+        cabecera_transcripcion.pack(fill="x", padx=24, pady=(2, 6))
         ctk.CTkLabel(
-            self.tab_grabar,
+            cabecera_transcripcion,
             text="Transcripción en directo",
             text_color=COLOR_TEXTO,
             font=ctk.CTkFont(size=15, weight="bold"),
             anchor="w",
-        ).pack(fill="x", padx=24, pady=(2, 6))
+        ).pack(side="left", fill="x", expand=True)
+        self.btn_copiar_transcripcion = ctk.CTkButton(
+            cabecera_transcripcion,
+            text="Copiar todo",
+            command=self._copiar_transcripcion_directo,
+            width=105,
+            height=30,
+            fg_color="transparent",
+            border_width=1,
+            border_color=COLOR_BORDE,
+        )
+        self.btn_copiar_transcripcion.pack(side="right")
         self.texto_grabar = ctk.CTkTextbox(
             self.tab_grabar,
             font=ctk.CTkFont(size=14),
@@ -447,11 +464,16 @@ class AsistenteClasesApp(ctk.CTk):
             border_color=COLOR_BORDE,
         )
         self.texto_grabar.pack(fill="both", expand=True, padx=24, pady=(0, 10))
+        self.texto_grabar.configure(state="disabled")
+        self.texto_grabar.bind(
+            "<Button-3>", self._abrir_menu_transcripcion, add="+"
+        )
         ctk.CTkLabel(
             self.tab_grabar,
             text=(
                 "El audio se guarda continuamente y la transcripción se actualiza "
-                "automáticamente durante la grabación."
+                "automáticamente durante la grabación. Puedes seleccionar texto y "
+                "copiarlo con Ctrl+C sin detenerla."
             ),
             text_color="#aaaaaa",
             anchor="w",
@@ -1599,6 +1621,8 @@ class AsistenteClasesApp(ctk.CTk):
             consolidar_audio_completo=True,
             min_hablantes=self.config_obj.min_hablantes,
             max_hablantes=self.config_obj.max_hablantes,
+            materia=materia,
+            titulo=titulo,
         )
         self.grabador = GrabadorAudio(dispositivo.sample_rate, dispositivo.indice)
         ok = self.grabador.iniciar(
@@ -1648,10 +1672,10 @@ class AsistenteClasesApp(ctk.CTk):
         self._grabacion_pausada = False
         self._nivel_audio_pendiente = None
         self._nivel_audio_mostrado = 0.0
-        self.texto_grabar.delete("1.0", "end")
-        self.texto_grabar.insert(
-            "end",
-            "Escuchando… El primer texto aparecerá automáticamente en unos segundos."
+        self._texto_grabar_renderizado = actualizar_texto(
+            self.texto_grabar,
+            "Escuchando… El primer texto aparecerá automáticamente en unos segundos.",
+            "",
         )
         self.btn_grabar.configure(state="disabled")
         self.btn_otra_entrada.configure(state="normal")
@@ -1923,9 +1947,42 @@ class AsistenteClasesApp(ctk.CTk):
     def _mostrar_transcripcion_incremental(self, segmentos):
         if self._cerrando:
             return
-        self.texto_grabar.delete("1.0", "end")
-        self.texto_grabar.insert("end", formatear_transcripcion_continua(segmentos))
-        self.texto_grabar.see("end")
+        texto = formatear_transcripcion_continua(segmentos)
+        self._texto_grabar_renderizado = actualizar_texto(
+            self.texto_grabar,
+            texto,
+            self._texto_grabar_renderizado,
+            seguir_final=not hay_seleccion(self.texto_grabar),
+        )
+
+    def _copiar_transcripcion_directo(self) -> None:
+        texto = copiar_texto(self, self.texto_grabar)
+        self.estado.configure(
+            text=(
+                "Transcripción copiada al portapapeles."
+                if texto
+                else "Todavía no hay transcripción que copiar."
+            )
+        )
+
+    def _abrir_menu_transcripcion(self, evento) -> None:
+        menu = Menu(self, tearoff=False)
+        seleccion = hay_seleccion(self.texto_grabar)
+        menu.add_command(
+            label="Copiar selección",
+            state="normal" if seleccion else "disabled",
+            command=lambda: copiar_texto(
+                self, self.texto_grabar, solo_seleccion=True
+            ),
+        )
+        menu.add_command(
+            label="Copiar toda la transcripción",
+            command=self._copiar_transcripcion_directo,
+        )
+        try:
+            menu.tk_popup(evento.x_root, evento.y_root)
+        finally:
+            menu.grab_release()
 
     def _grabacion_incremental_finalizada(
         self, resultado: ResultadoGrabacion, nivel_maximo: float
@@ -1943,10 +2000,10 @@ class AsistenteClasesApp(ctk.CTk):
             )
             return
         if not resultado.segmentos:
-            self.texto_grabar.delete("1.0", "end")
-            self.texto_grabar.insert(
-                "end",
+            self._texto_grabar_renderizado = actualizar_texto(
+                self.texto_grabar,
                 "No se detectó voz. El audio sí se ha guardado para poder revisarlo.",
+                self._texto_grabar_renderizado,
             )
             self.estado.configure(text="Grabación guardada sin voz reconocible.")
             diagnostico = (
@@ -2044,7 +2101,12 @@ class AsistenteClasesApp(ctk.CTk):
             return
         barra = self.progreso_grabar if tab == "grabar" else self.progreso_archivo
         caja = self.texto_grabar if tab == "grabar" else self.texto_archivo
-        caja.delete("1.0", "end")
+        if caja is self.texto_grabar:
+            self._texto_grabar_renderizado = actualizar_texto(
+                caja, "", self._texto_grabar_renderizado
+            )
+        else:
+            caja.delete("1.0", "end")
         if tab == "archivo":
             self.btn_seleccionar_archivo.configure(state="disabled")
             self.btn_transcribir_archivo.configure(state="disabled")
@@ -2066,6 +2128,7 @@ class AsistenteClasesApp(ctk.CTk):
                     ),
                     min_hablantes=self.config_obj.min_hablantes,
                     max_hablantes=self.config_obj.max_hablantes,
+                    contexto_clase=f"{materia} · {titulo}",
                 )
                 # Si el origen era un vídeo, ``ruta_procesable`` es el WAV
                 # temporal extraído por FFmpeg. Se copia antes de eliminarlo
@@ -2097,13 +2160,18 @@ class AsistenteClasesApp(ctk.CTk):
         self.estado.configure(text=mensaje)
 
     def _mostrar_resultados(self, caja, segmentos, carpeta):
-        caja.delete("1.0", "end")
-        caja.insert(
-            "end",
+        texto = (
             formatear_transcripcion_continua(segmentos)
             if segmentos
-            else "No se detectó voz.",
+            else "No se detectó voz."
         )
+        if caja is self.texto_grabar:
+            self._texto_grabar_renderizado = actualizar_texto(
+                caja, texto, self._texto_grabar_renderizado
+            )
+        else:
+            caja.delete("1.0", "end")
+            caja.insert("end", texto)
         self.progreso_grabar.set(0)
         self.progreso_archivo.set(0)
         self.estado.configure(text=f"Clase guardada: {carpeta}")
