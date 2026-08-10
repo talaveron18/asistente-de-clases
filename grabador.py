@@ -361,7 +361,11 @@ class GrabadorAudio:
             for rate in rates:
                 max_canales = max(1, int(datos.get("max_input_channels", 1)))
                 canales_a_probar = []
-                for canales in (min(max_canales, 4), min(max_canales, 2), 1):
+                # Navegadores y aplicaciones de voz piden una entrada mono y
+                # dejan al controlador aplicar la mezcla/beamforming del array.
+                # Abrir cuatro elementos crudos y escoger el de mayor RMS no
+                # equivale a esa voz procesada y puede privilegiar ruido de sala.
+                for canales in (1, min(max_canales, 2), min(max_canales, 4)):
                     if canales not in canales_a_probar:
                         canales_a_probar.append(canales)
                 compatible = None

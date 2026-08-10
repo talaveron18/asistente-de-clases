@@ -45,7 +45,15 @@ class Config:
     def validar(self):
         if self.hf_token and len(self.hf_token) < 10:
             return False, "El token de Hugging Face parece incompleto. Déjalo vacío para transcribir sin diarización."
-        if self.whisper_model not in ["tiny", "base", "small", "medium", "large-v3", "large-v2"]:
+        if self.whisper_model not in [
+            "tiny",
+            "base",
+            "small",
+            "medium",
+            "large-v3-turbo",
+            "large-v3",
+            "large-v2",
+        ]:
             return False, "Modelo Whisper no válido."
         return True, "Configuración válida."
 

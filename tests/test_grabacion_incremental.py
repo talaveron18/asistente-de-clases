@@ -109,6 +109,42 @@ def test_hardware_conserva_rutas_con_frecuencias_nativas_distintas(monkeypatch):
     assert [entrada.sample_rate for entrada in dispositivos] == [48000, 44100]
 
 
+def test_hardware_pide_mono_antes_que_canales_crudos_del_array(monkeypatch):
+    canales_probados = []
+
+    class Predeterminado:
+        device = (0, 9)
+
+    class SoundDeviceFalso:
+        default = Predeterminado()
+
+        @staticmethod
+        def query_devices():
+            return [
+                {
+                    "name": "Microphone Array (Realtek Audio)",
+                    "max_input_channels": 4,
+                    "default_samplerate": 48000,
+                    "hostapi": 0,
+                }
+            ]
+
+        @staticmethod
+        def query_hostapis():
+            return [{"name": "Windows WASAPI", "default_input_device": 0}]
+
+        @staticmethod
+        def check_input_settings(channels, **_kwargs):
+            canales_probados.append(channels)
+
+    monkeypatch.setattr(modulo_grabador, "_sounddevice", SoundDeviceFalso)
+
+    dispositivo = GrabadorAudio.detectar_dispositivo_entrada(16000)
+
+    assert canales_probados == [1]
+    assert dispositivo.canales == 1
+
+
 def test_hardware_prefiere_wasapi_al_clon_mme_predeterminado(monkeypatch):
     class Predeterminado:
         device = (0, 9)
@@ -842,6 +878,50 @@ def test_transcripcion_se_guarda_antes_de_detener(tmp_path):
     assert json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))[
         "estado_grabacion"
     ] == "guardada"
+
+
+def test_salida_descartada_se_registra_sin_borrar_el_audio(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    carpeta = repositorio.iniciar_grabacion("Patología", "SDRA")
+    fragmento_wav = carpeta / "fragmentos_audio" / "fragmento_000001.wav"
+    _wav(fragmento_wav)
+
+    class TranscriptorConDescarte:
+        model_size = "small"
+        dispositivo_real = "cpu"
+
+        @staticmethod
+        def transcribir_fragmento(_ruta):
+            return []
+
+        @staticmethod
+        def consumir_descartes():
+            return [
+                {
+                    "evento": "texto_descartado",
+                    "ambito": "directo",
+                    "texto": "frase inventada frase inventada",
+                    "razon": "bucle de prueba",
+                }
+            ]
+
+    incremental = TranscripcionIncremental(
+        TranscriptorConDescarte(), repositorio, carpeta
+    )
+    incremental.encolar(FragmentoAudio(1, str(fragmento_wav), 0, 10))
+    resultado = incremental.finalizar()
+
+    registros = [
+        json.loads(linea)
+        for linea in (carpeta / "diagnostico_transcripcion.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert resultado.completa
+    assert fragmento_wav.exists()
+    assert registros[0]["evento"] == "texto_descartado"
+    assert registros[0]["fragmento"] == 1
+    assert registros[0]["razon"] == "bucle de prueba"
 
 
 def test_finalizar_grabacion_registra_audio_completo(tmp_path):

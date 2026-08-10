@@ -2,38 +2,30 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
-
-CONTEXTO_MEDICINA_ARGENTINA = (
-    "Clase universitaria de Medicina en español rioplatense de Argentina. "
-    "Terminología médica precisa: anatomía, fisiología, fisiopatología, "
-    "microbiología, inmunología, patología, farmacología, diagnóstico, "
-    "tratamiento, signos y síntomas."
-)
-MAX_CARACTERES_CONTEXTO = 260
+from audio_asr import preparar_fragmento_asr
 
 
-def construir_prompt_transcripcion(contexto_clase: str = "", contexto_previo: str = "") -> str:
-    """Crea un contexto breve para Whisper sin consumir su ventana de texto.
-
-    El prompt no reescribe el habla del docente: fija la variedad de español y
-    el dominio léxico. El final ya reconocido ayuda a resolver términos que
-    quedan cortados entre dos fragmentos de audio.
-    """
-    contexto = " ".join(f"{contexto_clase} {contexto_previo}".split()).strip()
-    if len(contexto) > MAX_CARACTERES_CONTEXTO:
-        contexto = contexto[-MAX_CARACTERES_CONTEXTO:]
-        primer_espacio = contexto.find(" ")
-        if primer_espacio >= 0:
-            contexto = contexto[primer_espacio + 1 :]
-    if contexto:
-        return f"{CONTEXTO_MEDICINA_ARGENTINA} Contexto de la clase: {contexto}"
-    return CONTEXTO_MEDICINA_ARGENTINA
+OPCIONES_DECODIFICACION = {
+    "language": None,
+    "beam_size": 3,
+    "vad_filter": True,
+    "condition_on_previous_text": False,
+    "repetition_penalty": 1.08,
+    "no_repeat_ngram_size": 4,
+    "compression_ratio_threshold": 2.4,
+    "log_prob_threshold": -1.0,
+    "no_speech_threshold": 0.6,
+    "temperature": 0.0,
+}
+_PATRON_PALABRA = re.compile(r"\w+", flags=re.UNICODE)
 
 
 def _ffmpeg_executable() -> str:
@@ -85,6 +77,59 @@ class SegmentoTranscrito:
         return f"**{linea}**" if self.rol == "Docente" else f"*{linea}*"
 
 
+@dataclass(frozen=True)
+class _SegmentoReconocido:
+    start: float
+    end: float
+    text: str
+
+
+def _valor_metrica(segmento, nombre: str) -> float | None:
+    valor = getattr(segmento, nombre, None)
+    try:
+        return float(valor) if valor is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalizar_texto(texto: str) -> str:
+    return " ".join(
+        coincidencia.group(0).casefold()
+        for coincidencia in _PATRON_PALABRA.finditer(texto)
+    )
+
+
+def _recortar_repeticion_degenerada(texto: str) -> tuple[str, str | None]:
+    """Corta una cola repetida tres veces sin reescribir el texto válido previo."""
+    coincidencias = list(_PATRON_PALABRA.finditer(texto))
+    palabras = [coincidencia.group(0).casefold() for coincidencia in coincidencias]
+    total = len(palabras)
+    for inicio in range(total):
+        maximo = min(16, (total - inicio) // 3)
+        for tamano in range(3, maximo + 1):
+            patron = palabras[inicio : inicio + tamano]
+            repeticiones = 1
+            posicion = inicio + tamano
+            while palabras[posicion : posicion + tamano] == patron:
+                repeticiones += 1
+                posicion += tamano
+            repetidas = repeticiones * tamano
+            cola = total - inicio
+            if (
+                repeticiones >= 3
+                and repetidas >= 12
+                and repetidas / max(cola, 1) >= 0.7
+            ):
+                prefijo = texto[: coincidencias[inicio].start()].strip()
+                if len(_PATRON_PALABRA.findall(prefijo)) < 5:
+                    prefijo = ""
+                return prefijo, (
+                    f"secuencia de {tamano} palabras repetida "
+                    f"{repeticiones} veces"
+                )
+    return texto.strip(), None
+
+
 class TranscriptorClases:
     def __init__(self, hf_token: str = "", model_size: str = "medium", usar_gpu: bool = True, idioma: str = "es"):
         self.hf_token = hf_token.strip()
@@ -100,6 +145,10 @@ class TranscriptorClases:
         self._whisper_model_cls = None
         self._callback_status = None
         self.ultimo_aviso = ""
+        self.ultimo_diagnostico_audio = None
+        self._historial_fragmentos: deque[str] = deque(maxlen=3)
+        self._descartes_pendientes: list[dict] = []
+        self._diagnosticos_lock = threading.Lock()
 
     def cargar_modelos(self, callback_status: Optional[Callable] = None):
         self._callback_status = callback_status
@@ -229,13 +278,117 @@ class TranscriptorClases:
                         f"por CPU. GPU: {error_gpu}. CPU: {error_cpu}"
                     ) from error_cpu
 
+    def _opciones_decodificacion(self, silencio_ms: int) -> dict:
+        opciones = dict(OPCIONES_DECODIFICACION)
+        opciones["language"] = None if self.idioma == "auto" else self.idioma
+        opciones["vad_parameters"] = {
+            "threshold": 0.5,
+            "min_speech_duration_ms": 250,
+            "min_silence_duration_ms": silencio_ms,
+            "speech_pad_ms": 400,
+        }
+        return opciones
+
+    def _registrar_descarte(
+        self, segmento, texto: str, razon: str, ambito: str
+    ) -> None:
+        diagnostico = {
+            "evento": "texto_descartado",
+            "ambito": ambito,
+            "inicio": _valor_metrica(segmento, "start"),
+            "fin": _valor_metrica(segmento, "end"),
+            "texto": texto.strip(),
+            "razon": razon,
+            "no_speech_prob": _valor_metrica(segmento, "no_speech_prob"),
+            "avg_logprob": _valor_metrica(segmento, "avg_logprob"),
+            "compression_ratio": _valor_metrica(segmento, "compression_ratio"),
+            "audio": (
+                self.ultimo_diagnostico_audio if ambito == "directo" else None
+            ),
+        }
+        with self._diagnosticos_lock:
+            self._descartes_pendientes.append(diagnostico)
+
+    def consumir_descartes(self) -> list[dict]:
+        """Entrega los diagnósticos una sola vez para persistirlos con la clase."""
+        with self._diagnosticos_lock:
+            descartes = self._descartes_pendientes
+            self._descartes_pendientes = []
+        return descartes
+
+    def _filtrar_segmentos(self, segmentos, ambito: str) -> list[_SegmentoReconocido]:
+        resultado = []
+        for segmento in segmentos:
+            texto_original = str(getattr(segmento, "text", "")).strip()
+            if not texto_original:
+                continue
+            texto, razon_repeticion = _recortar_repeticion_degenerada(
+                texto_original
+            )
+            no_voz = _valor_metrica(segmento, "no_speech_prob")
+            logprob = _valor_metrica(segmento, "avg_logprob")
+            compresion = _valor_metrica(segmento, "compression_ratio")
+            senales_malas = sum(
+                (
+                    no_voz is not None and no_voz >= 0.6,
+                    logprob is not None and logprob <= -1.0,
+                    compresion is not None and compresion >= 2.4,
+                )
+            )
+            razon = razon_repeticion
+            if senales_malas >= 2:
+                razon = razon or "confianza baja y salida anómala"
+                texto = ""
+
+            if razon:
+                self._registrar_descarte(
+                    segmento, texto_original, razon, ambito
+                )
+                self._avisar(
+                    "Se descartó una salida repetitiva o sin voz; "
+                    "el audio original permanece guardado."
+                )
+            if texto:
+                resultado.append(
+                    _SegmentoReconocido(segmento.start, segmento.end, texto)
+                )
+        return resultado
+
+    def _filtrar_bucle_entre_fragmentos(
+        self, originales, filtrados: list[_SegmentoReconocido]
+    ) -> list[_SegmentoReconocido]:
+        texto = " ".join(segmento.text for segmento in filtrados).strip()
+        normalizado = _normalizar_texto(texto)
+        if not normalizado:
+            return filtrados
+        repetido = (
+            len(self._historial_fragmentos) >= 2
+            and normalizado == self._historial_fragmentos[-1]
+            and normalizado == self._historial_fragmentos[-2]
+        )
+        audio_debil = bool(
+            self.ultimo_diagnostico_audio
+            and self.ultimo_diagnostico_audio.get("rms_activo_dbfs", 0.0)
+            <= -38.0
+        )
+        self._historial_fragmentos.append(normalizado)
+        if not (repetido and audio_debil):
+            return filtrados
+        referencia = originales[0] if originales else filtrados[0]
+        razon = "mismo texto en tres fragmentos consecutivos con audio débil"
+        self._registrar_descarte(referencia, texto, razon, "directo")
+        self._avisar(
+            "Se descartó una salida repetida entre fragmentos; "
+            "el audio original permanece guardado."
+        )
+        return []
+
     def transcribir_archivo(
         self,
         archivo_audio: str,
         callback_progreso=None,
         min_hablantes: int = 2,
         max_hablantes: int = 10,
-        contexto_clase: str = "",
     ):
         if not self.modelos_cargados or self.whisper_model is None:
             raise RuntimeError("Los modelos no están cargados.")
@@ -247,16 +400,13 @@ class TranscriptorClases:
                 callback_progreso(msg, p)
 
         prog("Transcribiendo con Whisper...", 0.05)
-        language = None if self.idioma == "auto" else self.idioma
         segmentos_whisper, _info = self._inferir(
             archivo_audio,
-            language=language,
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
-            condition_on_previous_text=True,
-            initial_prompt=construir_prompt_transcripcion(contexto_clase),
-            temperature=0.0,
+            **self._opciones_decodificacion(silencio_ms=500),
+        )
+        self._historial_fragmentos.clear()
+        segmentos_whisper = self._filtrar_segmentos(
+            segmentos_whisper, ambito="archivo"
         )
         if not segmentos_whisper:
             return []
@@ -264,7 +414,12 @@ class TranscriptorClases:
 
         if not self.diarizacion_disponible:
             prog("Finalizando sin diarización.", 1.0)
-            return [SegmentoTranscrito(s.start, s.end, s.text, "SPEAKER_00", "Docente") for s in segmentos_whisper]
+            return [
+                SegmentoTranscrito(
+                    s.start, s.end, s.text, "SPEAKER_00", "Docente"
+                )
+                for s in segmentos_whisper
+            ]
 
         prog("Separando voces...", 0.6)
         kwargs = {"num_speakers": min_hablantes} if min_hablantes == max_hablantes else {"min_speakers": min_hablantes, "max_speakers": max_hablantes}
@@ -282,12 +437,7 @@ class TranscriptorClases:
         prog("Transcripción completada.", 1.0)
         return self._asignar_roles(self._fusionar(segmentos_whisper, turnos))
 
-    def transcribir_fragmento(
-        self,
-        archivo_audio: str,
-        contexto_clase: str = "",
-        contexto_previo: str = "",
-    ):
+    def transcribir_fragmento(self, archivo_audio: str):
         """Transcribe un fragmento corto sin bloquear la captura de audio.
 
         La diarización se reserva al procesamiento posterior. Ejecutarla cada
@@ -298,27 +448,20 @@ class TranscriptorClases:
             raise RuntimeError("Los modelos no están cargados.")
         if not os.path.isfile(archivo_audio):
             raise FileNotFoundError(archivo_audio)
-        language = None if self.idioma == "auto" else self.idioma
-        opciones = {
-            "language": language,
-            "beam_size": 3,
-            "vad_filter": True,
-            "vad_parameters": {"min_silence_duration_ms": 350},
-            "condition_on_previous_text": False,
-            "initial_prompt": construir_prompt_transcripcion(
-                contexto_clase, contexto_previo
-            ),
-            "temperature": 0.0,
-        }
-        segmentos_iter, _info = self._inferir(archivo_audio, **opciones)
-        # En micrófonos con ganancia baja, Silero puede considerar silencioso
-        # un fragmento que sí contiene voz. Un segundo intento sin VAD se hace
-        # solo para fragmentos cortos; nunca obliga a repetir un vídeo largo.
-        if not segmentos_iter:
-            opciones["vad_filter"] = False
-            opciones.pop("vad_parameters", None)
-            segmentos_iter, _info = self._inferir(archivo_audio, **opciones)
-        resultado = [
+        audio_asr, diagnostico = preparar_fragmento_asr(archivo_audio)
+        self.ultimo_diagnostico_audio = (
+            diagnostico.como_dict() if diagnostico is not None else None
+        )
+        segmentos_originales, _info = self._inferir(
+            audio_asr, **self._opciones_decodificacion(silencio_ms=350)
+        )
+        segmentos_iter = self._filtrar_segmentos(
+            segmentos_originales, ambito="directo"
+        )
+        segmentos_iter = self._filtrar_bucle_entre_fragmentos(
+            segmentos_originales, segmentos_iter
+        )
+        return [
             SegmentoTranscrito(
                 segmento.start,
                 segmento.end,
@@ -328,7 +471,6 @@ class TranscriptorClases:
             )
             for segmento in segmentos_iter
         ]
-        return resultado
 
     @staticmethod
     def _fusionar(segmentos_whisper, turnos):

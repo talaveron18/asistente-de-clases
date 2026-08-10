@@ -1,6 +1,6 @@
-; ARGOS 0.7.2 — micrófono físico, texto continuo y controles de clase
+; ARGOS 0.7.3 — acondicionamiento de voz y protección anti-alucinaciones
 #define MyAppName "ARGOS"
-#define MyAppVersion "0.7.2"
+#define MyAppVersion "0.7.3"
 #define MyAppPublisher "Fernando Talaverón"
 #define MyAppExeName "ARGOS.exe"
 

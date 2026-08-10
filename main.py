@@ -100,6 +100,9 @@ class AsistenteClasesApp(ctk.CTk):
         self._grabacion_pausada = False
         self._cerrando = False
         self._recuperacion_grabaciones_activa = False
+        self._recarga_modelos_pendiente = False
+        self._carga_modelos_en_curso = False
+        self._modelo_grabacion_actual = ""
         self._texto_grabar_renderizado = ""
         self._hilo_ui = threading.get_ident()
         self._cola_ui: queue.SimpleQueue[tuple[object, tuple]] = queue.SimpleQueue()
@@ -1293,7 +1296,17 @@ class AsistenteClasesApp(ctk.CTk):
         self.token.pack(fill="x", pady=(0, 12))
         self.token.insert(0, self.config_obj.hf_token)
         ctk.CTkLabel(marco, text="Modelo Whisper", anchor="w").pack(fill="x")
-        self.modelo = ctk.CTkComboBox(marco, values=["tiny", "base", "small", "medium", "large-v3"])
+        self.modelo = ctk.CTkComboBox(
+            marco,
+            values=[
+                "tiny",
+                "base",
+                "small",
+                "medium",
+                "large-v3-turbo",
+                "large-v3",
+            ],
+        )
         self.modelo.pack(fill="x", pady=(4, 12))
         self.modelo.set(self.config_obj.whisper_model)
         ctk.CTkLabel(marco, text="Idioma", anchor="w").pack(fill="x")
@@ -1621,9 +1634,8 @@ class AsistenteClasesApp(ctk.CTk):
             consolidar_audio_completo=True,
             min_hablantes=self.config_obj.min_hablantes,
             max_hablantes=self.config_obj.max_hablantes,
-            materia=materia,
-            titulo=titulo,
         )
+        self._modelo_grabacion_actual = self.transcriptor.model_size
         self.grabador = GrabadorAudio(dispositivo.sample_rate, dispositivo.indice)
         ok = self.grabador.iniciar(
             self._publicar_nivel_audio,
@@ -2051,6 +2063,13 @@ class AsistenteClasesApp(ctk.CTk):
         self._grabacion_pausada = False
         self._carpeta_grabacion = None
         self._transcripcion_incremental = None
+        self._modelo_grabacion_actual = ""
+        if (
+            self._recarga_modelos_pendiente
+            and not self._carga_modelos_en_curso
+        ):
+            self._recarga_modelos_pendiente = False
+            self.after(10, self._cargar_modelos)
 
     def _abrir_importador_desde_inicio(self):
         self.tabs.set("Importar archivo")
@@ -2128,7 +2147,6 @@ class AsistenteClasesApp(ctk.CTk):
                     ),
                     min_hablantes=self.config_obj.min_hablantes,
                     max_hablantes=self.config_obj.max_hablantes,
-                    contexto_clase=f"{materia} · {titulo}",
                 )
                 # Si el origen era un vídeo, ``ruta_procesable`` es el WAV
                 # temporal extraído por FFmpeg. Se copia antes de eliminarlo
@@ -2198,45 +2216,124 @@ class AsistenteClasesApp(ctk.CTk):
             messagebox.showerror("Configuración", mensaje)
             return
         self.config_obj.guardar()
+        if self.grabador and self.grabador.esta_grabando():
+            self._recarga_modelos_pendiente = True
+            actual = (
+                self.transcriptor.model_size
+                if self.transcriptor is not None
+                else "modelo actual"
+            )
+            self.estado_modelos.configure(
+                text=(
+                    f"Usando {actual} · {self.config_obj.whisper_model} "
+                    "se cargará al terminar"
+                ),
+                text_color=COLOR_ALERTA,
+            )
+            self.estado.configure(
+                text="Configuración guardada; la grabación continúa sin cambiar de motor."
+            )
+            return
         self._cargar_modelos()
 
     def _cargar_modelos(self):
-        self.estado_modelos.configure(text="Cargando modelos...", text_color="#ffb300")
+        objetivo = self.config_obj.whisper_model
+        if self._carga_modelos_en_curso:
+            self._recarga_modelos_pendiente = True
+            actual = (
+                self._modelo_grabacion_actual
+                or getattr(self.transcriptor, "model_size", "modelo actual")
+            )
+            self.estado_modelos.configure(
+                text=f"Usando {actual} · {objetivo} pendiente",
+                text_color=COLOR_ALERTA,
+            )
+            return
+        self._carga_modelos_en_curso = True
+        solicitud = (
+            self.config_obj.hf_token,
+            objetivo,
+            self.config_obj.usar_gpu,
+            self.config_obj.idioma,
+        )
+        actual = getattr(self.transcriptor, "model_size", "")
+        texto_carga = (
+            f"Usando {actual} · cargando {objetivo}…"
+            if actual
+            else f"Cargando {objetivo}…"
+        )
+        self.estado_modelos.configure(
+            text=texto_carga, text_color=COLOR_ALERTA
+        )
+
         def worker():
             try:
-                motor = TranscriptorClases(
-                    self.config_obj.hf_token, self.config_obj.whisper_model,
-                    self.config_obj.usar_gpu, self.config_obj.idioma
-                )
+                motor = TranscriptorClases(*solicitud)
+
                 def informar_carga(mensaje, progreso):
-                    self._enviar_ui(
-                        self.estado.configure, {"text": mensaje}
-                    )
+                    if not (self.grabador and self.grabador.esta_grabando()):
+                        self._enviar_ui(
+                            self.estado.configure, {"text": mensaje}
+                        )
                     self._registrar_progreso_modelos(mensaje, progreso)
 
                 motor.cargar_modelos(informar_carga)
-                self.transcriptor = motor
                 texto = f"Listo · {motor.dispositivo_real.upper()}" + (
                     " · diarización" if motor.diarizacion_disponible else ""
                 )
-                self._enviar_ui(
-                    self.estado_modelos.configure,
-                    {"text": texto, "text_color": "#4caf50"},
-                )
-                self._enviar_ui(
-                    self.estado.configure,
-                    {"text": "Listo para grabar o transcribir."},
-                )
-                self._enviar_ui(self._recuperar_grabaciones_interrumpidas)
                 self._registrar_resultado_modelos(True, texto)
-            except Exception as exc:
                 self._enviar_ui(
-                    self.estado_modelos.configure,
-                    {"text": "Error", "text_color": "#ef5350"},
+                    self._fin_carga_modelos, motor, None, solicitud
                 )
-                self._enviar_ui(self.estado.configure, {"text": str(exc)})
+            except Exception as exc:
                 self._registrar_resultado_modelos(False, str(exc))
+                self._enviar_ui(
+                    self._fin_carga_modelos, None, str(exc), solicitud
+                )
         threading.Thread(target=worker, daemon=True).start()
+
+    def _fin_carga_modelos(self, motor, error: str | None, solicitud) -> None:
+        self._carga_modelos_en_curso = False
+        grabando = bool(self.grabador and self.grabador.esta_grabando())
+        if error:
+            actual = getattr(self.transcriptor, "model_size", "")
+            self.estado_modelos.configure(
+                text=(f"Usando {actual} · error al cargar" if actual else "Error"),
+                text_color=COLOR_PELIGRO,
+            )
+            if not grabando:
+                self.estado.configure(text=error)
+        else:
+            self.transcriptor = motor
+            if grabando and self._modelo_grabacion_actual:
+                texto = (
+                    f"Grabando con {self._modelo_grabacion_actual} · "
+                    f"{motor.model_size} listo para la próxima clase"
+                )
+            else:
+                texto = f"Listo · {motor.model_size} · {motor.dispositivo_real.upper()}" + (
+                    " · diarización" if motor.diarizacion_disponible else ""
+                )
+            self.estado_modelos.configure(
+                text=texto, text_color=COLOR_EXITO
+            )
+            if not grabando:
+                self.estado.configure(text="Listo para grabar o transcribir.")
+                self._recuperar_grabaciones_interrumpidas()
+
+        actual_solicitado = (
+            self.config_obj.hf_token,
+            self.config_obj.whisper_model,
+            self.config_obj.usar_gpu,
+            self.config_obj.idioma,
+        )
+        if self._recarga_modelos_pendiente and actual_solicitado != solicitud:
+            if grabando:
+                return
+            self._recarga_modelos_pendiente = False
+            self.after(10, self._cargar_modelos)
+        elif actual_solicitado == solicitud:
+            self._recarga_modelos_pendiente = False
 
     def _recuperar_grabaciones_interrumpidas(self):
         if self._recuperacion_grabaciones_activa or not self.transcriptor:

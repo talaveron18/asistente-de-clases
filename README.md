@@ -95,11 +95,12 @@ También puede utilizarse `EJECUTAR.bat`.
 - Grabación directa a WAV sin acumular la clase completa en memoria.
 - Detección automática del micrófono físico y de su frecuencia compatible;
   las capturas de salida como Mezcla estéreo y loopback quedan excluidas.
+- Captura mono para conservar el procesado de voz del controlador y
+  acondicionamiento adaptativo de los fragmentos débiles antes del ASR; el WAV
+  original se guarda siempre sin alterar.
 - Pausa, reanudación y cierre seguro de una grabación sin fragmentar la clase.
 - Transcripción incremental cada pocos segundos con guardado atómico durante
   la grabación; no espera al final de la clase.
-- Perfil lingüístico de Medicina en español rioplatense de Argentina, con la
-  materia, el título y el final del fragmento anterior como contexto.
 - Selección y copia del texto mientras la grabación continúa, sin perder la
   selección ni saltar al final cuando llega un nuevo fragmento.
 - Transcripción presentada en párrafos continuos y limpieza de las palabras
@@ -107,6 +108,10 @@ También puede utilizarse `EJECUTAR.bat`.
 - Fragmentos de audio recuperables y reanudación automática tras un cierre
   inesperado, sin duplicar lo ya transcrito.
 - Faster-Whisper con GPU opcional y retorno a CPU.
+- Modelos hasta `large-v3-turbo`/`large-v3`, con Faster-Whisper 1.2.1 fijado
+  para que el decodificador sea reproducible entre instaladores.
+- VAD y límites de repetición activos; los tramos sin voz no se fuerzan a una
+  segunda inferencia que pueda inventar texto.
 - Retorno automático a CPU si CUDA carga el modelo pero falla al transcribir.
 - Diarización opcional mediante Pyannote cuando se instala y configura.
 - Importación de audio y vídeo largo.

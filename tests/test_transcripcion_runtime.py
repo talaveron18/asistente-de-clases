@@ -63,7 +63,7 @@ def test_inferencia_cuda_perezosa_reintenta_automaticamente_en_cpu(
     assert any("automáticamente por CPU" in aviso for aviso in avisos)
 
 
-def test_fragmento_con_voz_baja_reintenta_sin_vad(tmp_path):
+def test_fragmento_sin_voz_no_fuerza_inferencia_sin_vad(tmp_path):
     opciones = []
 
     class ModeloFalso:
@@ -81,8 +81,104 @@ def test_fragmento_con_voz_baja_reintenta_sin_vad(tmp_path):
 
     segmentos = motor.transcribir_fragmento(str(ruta))
 
-    assert len(segmentos) == 1
-    assert [opcion.get("vad_filter") for opcion in opciones] == [True, False]
+    assert segmentos == []
+    assert [opcion.get("vad_filter") for opcion in opciones] == [True]
+
+
+def test_configuracion_aplaza_cambio_de_modelo_mientras_graba():
+    cargas = []
+
+    class Campo:
+        def __init__(self, valor):
+            self.valor = valor
+
+        def get(self):
+            return self.valor
+
+    class ConfigFalsa:
+        hf_token = ""
+        whisper_model = "small"
+        idioma = "es"
+        usar_gpu = False
+
+        @staticmethod
+        def validar():
+            return True, "ok"
+
+        @staticmethod
+        def guardar():
+            return True
+
+    class Etiqueta:
+        def __init__(self):
+            self.opciones = {}
+
+        def configure(self, **opciones):
+            self.opciones = opciones
+
+    app = types.SimpleNamespace(
+        config_obj=ConfigFalsa(),
+        token=Campo(""),
+        modelo=Campo("large-v3-turbo"),
+        idioma=Campo("es"),
+        gpu=Campo(True),
+        grabador=types.SimpleNamespace(esta_grabando=lambda: True),
+        transcriptor=types.SimpleNamespace(model_size="small"),
+        estado_modelos=Etiqueta(),
+        estado=Etiqueta(),
+        _recarga_modelos_pendiente=False,
+        _cargar_modelos=lambda: cargas.append(True),
+    )
+
+    AsistenteClasesApp._guardar_config(app)
+
+    assert cargas == []
+    assert app._recarga_modelos_pendiente is True
+    assert app.config_obj.whisper_model == "large-v3-turbo"
+    assert "se cargará al terminar" in app.estado_modelos.opciones["text"]
+
+
+def test_fin_de_carga_indica_que_la_clase_conserva_su_modelo():
+    class Etiqueta:
+        def __init__(self):
+            self.opciones = {}
+
+        def configure(self, **opciones):
+            self.opciones = opciones
+
+    solicitud = ("", "large-v3-turbo", True, "es")
+    nuevo = types.SimpleNamespace(
+        model_size="large-v3-turbo",
+        dispositivo_real="cuda",
+        diarizacion_disponible=False,
+    )
+    estado = Etiqueta()
+    app = types.SimpleNamespace(
+        _carga_modelos_en_curso=True,
+        _recarga_modelos_pendiente=False,
+        _modelo_grabacion_actual="small",
+        grabador=types.SimpleNamespace(esta_grabando=lambda: True),
+        transcriptor=types.SimpleNamespace(model_size="small"),
+        estado_modelos=Etiqueta(),
+        estado=estado,
+        config_obj=types.SimpleNamespace(
+            hf_token="",
+            whisper_model="large-v3-turbo",
+            usar_gpu=True,
+            idioma="es",
+        ),
+        _recuperar_grabaciones_interrumpidas=lambda: (_ for _ in ()).throw(
+            AssertionError("No debe recuperar mientras graba")
+        ),
+        after=lambda *_args: None,
+    )
+
+    AsistenteClasesApp._fin_carga_modelos(app, nuevo, None, solicitud)
+
+    assert app.transcriptor is nuevo
+    assert "Grabando con small" in app.estado_modelos.opciones["text"]
+    assert "large-v3-turbo listo para la próxima clase" in app.estado_modelos.opciones["text"]
+    assert estado.opciones == {}
 
 
 def test_selector_unificado_envia_documento_a_biblioteca(tmp_path, monkeypatch):
