@@ -1,8 +1,10 @@
 """Cola durable de transcripción mientras el micrófono sigue grabando."""
 from __future__ import annotations
 
-import queue
+import inspect
 import json
+import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -26,6 +28,63 @@ class ResultadoGrabacion:
         return not self.errores
 
 
+def _metricas_version(segmentos: Iterable[SegmentoTranscrito]) -> dict:
+    segmentos = list(segmentos)
+    palabras = sum(
+        len(re.findall(r"\w+", segmento.texto, flags=re.UNICODE))
+        for segmento in segmentos
+    )
+    return {
+        "segmentos": len(segmentos),
+        "palabras": palabras,
+        "fin_segundos": round(
+            max((segmento.fin for segmento in segmentos), default=0.0), 3
+        ),
+    }
+
+
+def evaluar_versiones_transcripcion(
+    directo: Iterable[SegmentoTranscrito],
+    definitiva: Iterable[SegmentoTranscrito],
+) -> dict:
+    """Elige la definitiva salvo que exista una pérdida clara de cobertura."""
+    metricas_directo = _metricas_version(directo)
+    metricas_definitiva = _metricas_version(definitiva)
+    palabras_directo = metricas_directo["palabras"]
+    palabras_final = metricas_definitiva["palabras"]
+    fin_directo = metricas_directo["fin_segundos"]
+    fin_final = metricas_definitiva["fin_segundos"]
+
+    ratio_palabras = palabras_final / max(1, palabras_directo)
+    ratio_tiempo = fin_final / max(1.0, fin_directo)
+    if palabras_final == 0:
+        elegida = "directo"
+        motivo = "La pasada definitiva no detectó texto."
+    elif palabras_directo == 0:
+        elegida = "definitiva"
+        motivo = "No había texto en directo y la pasada definitiva sí detectó voz."
+    elif ratio_palabras < 0.45:
+        elegida = "directo"
+        motivo = "La pasada definitiva perdió más de la mitad de las palabras."
+    elif ratio_tiempo < 0.65:
+        elegida = "directo"
+        motivo = "La pasada definitiva terminó mucho antes que el texto en directo."
+    elif ratio_palabras < 0.65 and ratio_tiempo < 0.90:
+        elegida = "directo"
+        motivo = "La pasada definitiva perdió cobertura textual y temporal."
+    else:
+        elegida = "definitiva"
+        motivo = "La pasada definitiva conserva una cobertura suficiente."
+    return {
+        "version_elegida": elegida,
+        "motivo": motivo,
+        "directo": metricas_directo,
+        "definitiva": metricas_definitiva,
+        "ratio_palabras": round(ratio_palabras, 4),
+        "ratio_tiempo": round(ratio_tiempo, 4),
+    }
+
+
 class TranscripcionIncremental:
     """Procesa fragmentos en orden y confirma cada uno en disco.
 
@@ -43,6 +102,9 @@ class TranscripcionIncremental:
         consolidar_audio_completo: bool = False,
         min_hablantes: int = 2,
         max_hablantes: int = 10,
+        modelo_final: str = "large-v3-turbo",
+        creador_transcriptor_final: Callable | None = None,
+        segmentos_directo_iniciales: Iterable[SegmentoTranscrito] | None = None,
     ):
         self.transcriptor = transcriptor
         self.repositorio = repositorio
@@ -52,6 +114,13 @@ class TranscripcionIncremental:
         self.consolidar_audio_completo = consolidar_audio_completo
         self.min_hablantes = min_hablantes
         self.max_hablantes = max_hablantes
+        self.modelo_final = modelo_final
+        self.creador_transcriptor_final = creador_transcriptor_final
+        self.segmentos_directo_iniciales = (
+            list(segmentos_directo_iniciales)
+            if segmentos_directo_iniciales is not None
+            else None
+        )
         self._cola: queue.Queue[FragmentoAudio | None] = queue.Queue()
         self._errores: list[str] = []
         self._cerrada = False
@@ -84,11 +153,21 @@ class TranscripcionIncremental:
             self._errores.append(
                 "La cola de transcripción no terminó dentro del tiempo previsto."
             )
-        segmentos_directo = self.repositorio.segmentos_grabacion(self.carpeta)
+        segmentos_directo = (
+            list(self.segmentos_directo_iniciales)
+            if self.segmentos_directo_iniciales is not None
+            else self.repositorio.segmentos_grabacion(self.carpeta)
+        )
         segmentos_finales = None
+        decision = None
         if self.consolidar_audio_completo and not self._hilo.is_alive():
-            segmentos_finales = self._consolidar_audio_completo(segmentos_directo)
-            if segmentos_finales is not None:
+            segmentos_finales, decision = self._consolidar_audio_completo(
+                segmentos_directo
+            )
+            if (
+                segmentos_finales is not None
+                and (decision or {}).get("version_elegida") == "definitiva"
+            ):
                 # La pasada completa cubre también cualquier fragmento que haya
                 # fallado durante el directo. Los diagnósticos permanecen en
                 # disco, pero la clase ya no está incompleta.
@@ -97,7 +176,9 @@ class TranscripcionIncremental:
         segmentos = self.repositorio.finalizar_grabacion(
             self.carpeta,
             error,
+            segmentos_directo=segmentos_directo,
             segmentos_finales=segmentos_finales,
+            decision_transcripcion=decision,
         )
         return ResultadoGrabacion(
             self.carpeta,
@@ -108,13 +189,13 @@ class TranscripcionIncremental:
 
     def _consolidar_audio_completo(
         self, segmentos_directo: list[SegmentoTranscrito]
-    ) -> list[SegmentoTranscrito] | None:
+    ) -> tuple[list[SegmentoTranscrito] | None, dict | None]:
         audio = self.carpeta / "audio.wav"
         if not audio.is_file() or audio.stat().st_size <= 44:
             self._errores.append(
                 "No se pudo crear la transcripción final: falta el audio completo."
             )
-            return None
+            return None, None
         self._estado(
             "Audio completo guardado. Preparando la transcripción definitiva…"
         )
@@ -122,33 +203,70 @@ class TranscripcionIncremental:
         def progreso(mensaje: str, _valor: float) -> None:
             self._estado(f"Transcripción definitiva: {mensaje}")
 
+        motor_final = self.transcriptor
+        modelo_usado = getattr(self.transcriptor, "model_size", "desconocido")
+        fallback_modelo = False
+        if modelo_usado != self.modelo_final:
+            self._estado(f"Cargando el modelo definitivo {self.modelo_final}…")
+            try:
+                if self.creador_transcriptor_final is not None:
+                    motor_final = self.creador_transcriptor_final(
+                        self.modelo_final, progreso
+                    )
+                else:
+                    motor_final = self.transcriptor.crear_motor_para_modelo(
+                        self.modelo_final, progreso
+                    )
+                modelo_usado = getattr(
+                    motor_final, "model_size", self.modelo_final
+                )
+            except Exception as exc:
+                fallback_modelo = True
+                self._estado(
+                    f"No se pudo cargar {self.modelo_final} ({exc}); "
+                    f"la pasada final continúa con {modelo_usado}."
+                )
         try:
-            finales = self.transcriptor.transcribir_archivo(
-                str(audio),
-                callback_progreso=progreso,
-                min_hablantes=self.min_hablantes,
-                max_hablantes=self.max_hablantes,
-            )
-            self._registrar_descartes()
+            parametros = inspect.signature(
+                motor_final.transcribir_archivo
+            ).parameters
+            opciones = {
+                "callback_progreso": progreso,
+                "min_hablantes": self.min_hablantes,
+                "max_hablantes": self.max_hablantes,
+            }
+            if "acondicionar_audio" in parametros or any(
+                parametro.kind == inspect.Parameter.VAR_KEYWORD
+                for parametro in parametros.values()
+            ):
+                opciones["acondicionar_audio"] = True
+            finales = motor_final.transcribir_archivo(str(audio), **opciones)
+            self._registrar_descartes(transcriptor=motor_final)
         except Exception as exc:
             self._errores.append(f"Transcripción definitiva: {exc}")
             self._estado(
                 "No terminó la pasada definitiva; se conserva el texto en directo."
             )
-            return None
-        if segmentos_directo and not finales:
-            self._errores.append(
-                "La pasada definitiva no detectó texto aunque sí existe "
-                "transcripción en directo."
-            )
-            self._estado(
-                "La pasada definitiva no detectó voz; se conserva el texto en directo."
-            )
-            return None
-        self._estado(
-            "Transcripción definitiva completada sobre el audio íntegro."
+            return None, None
+        decision = evaluar_versiones_transcripcion(segmentos_directo, finales)
+        decision.update(
+            {
+                "modelo_solicitado": self.modelo_final,
+                "modelo_usado": modelo_usado,
+                "fallback_modelo": fallback_modelo,
+                "audio_acondicionado": True,
+            }
         )
-        return list(finales)
+        if decision["version_elegida"] == "directo":
+            self._estado(
+                "La pasada definitiva se guardó, pero no sustituirá al directo: "
+                + decision["motivo"]
+            )
+        else:
+            self._estado(
+                "Transcripción definitiva completada y seleccionada sobre el audio íntegro."
+            )
+        return list(finales), decision
 
     def cerrar_sin_esperar(self) -> None:
         """Permite cerrar la ventana; la recuperación continuará al reiniciar."""
@@ -230,9 +348,12 @@ class TranscripcionIncremental:
             pass
 
     def _registrar_descartes(
-        self, fragmento: FragmentoAudio | None = None
+        self,
+        fragmento: FragmentoAudio | None = None,
+        transcriptor: TranscriptorClases | None = None,
     ) -> None:
-        consumir = getattr(self.transcriptor, "consumir_descartes", None)
+        motor = transcriptor or self.transcriptor
+        consumir = getattr(motor, "consumir_descartes", None)
         if not callable(consumir):
             return
         try:
@@ -256,10 +377,10 @@ class TranscripcionIncremental:
                             else str(self.carpeta / "audio.wav")
                         ),
                         "modelo": getattr(
-                            self.transcriptor, "model_size", "desconocido"
+                            motor, "model_size", "desconocido"
                         ),
                         "dispositivo": getattr(
-                            self.transcriptor,
+                            motor,
                             "dispositivo_real",
                             "desconocido",
                         ),

@@ -10,7 +10,7 @@ from tkinter import Menu, filedialog, messagebox, simpledialog
 
 import customtkinter as ctk
 
-from biblioteca_medica import BibliotecaMedica, CATEGORIAS, EXTENSIONES_ADMITIDAS
+from biblioteca_medica import CATEGORIAS, EXTENSIONES_ADMITIDAS, BibliotecaMedica
 from config import Config
 from grabador import (
     UMBRAL_SENAL_UTIL,
@@ -36,9 +36,9 @@ from interfaz_argos import (
 )
 from media_utils import eliminar_temporal, preparar_para_transcripcion, tipo_archivo
 from repositorio import RepositorioClases, formatear_transcripcion_continua
-from transcriptor import TranscriptorClases
-from transcripcion_incremental import ResultadoGrabacion, TranscripcionIncremental
 from texto_en_directo import actualizar_texto, copiar_texto, hay_seleccion
+from transcripcion_incremental import ResultadoGrabacion, TranscripcionIncremental
+from transcriptor import TranscriptorClases
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -109,6 +109,7 @@ class AsistenteClasesApp(ctk.CTk):
         self._bucle_ui_after = None
         self._nivel_audio_pendiente: float | None = None
         self._nivel_audio_mostrado = 0.0
+        self._retranscripcion_audio_en_curso = False
 
         registrar_diagnostico_arranque("creando_interfaz")
         self._crear_interfaz()
@@ -738,6 +739,47 @@ class AsistenteClasesApp(ctk.CTk):
         )
         self.estado_material_detalle.pack(fill="x", padx=24, pady=(0, 10))
 
+        fila_transcripcion = ctk.CTkFrame(
+            self.tab_detalle, fg_color="transparent"
+        )
+        fila_transcripcion.pack(fill="x", padx=24, pady=(0, 10))
+        self.btn_retranscribir_audio = ctk.CTkButton(
+            fila_transcripcion,
+            text="Retranscribir audio",
+            width=145,
+            height=32,
+            fg_color=COLOR_ACENTO,
+            command=self._retranscribir_audio_detalle,
+        )
+        self.btn_retranscribir_audio.pack(side="left")
+        self.btn_usar_directo = ctk.CTkButton(
+            fila_transcripcion,
+            text="Usar directo",
+            width=110,
+            height=32,
+            fg_color=COLOR_PANEL_SUAVE,
+            command=lambda: self._activar_version_transcripcion("directo"),
+        )
+        self.btn_usar_directo.pack(side="left", padx=8)
+        self.btn_usar_definitiva = ctk.CTkButton(
+            fila_transcripcion,
+            text="Usar definitiva",
+            width=125,
+            height=32,
+            fg_color=COLOR_PANEL_SUAVE,
+            command=lambda: self._activar_version_transcripcion("definitiva"),
+        )
+        self.btn_usar_definitiva.pack(side="left")
+        self.estado_version_transcripcion = ctk.CTkLabel(
+            fila_transcripcion,
+            text="",
+            text_color=COLOR_TEXTO_SUAVE,
+            anchor="w",
+        )
+        self.estado_version_transcripcion.pack(
+            side="left", fill="x", expand=True, padx=12
+        )
+
         fila_fuentes = ctk.CTkFrame(self.tab_detalle, fg_color="transparent")
         fila_fuentes.pack(fill="x", padx=24, pady=(0, 10))
         self.fuentes_detalle = ctk.CTkLabel(
@@ -889,10 +931,25 @@ class AsistenteClasesApp(ctk.CTk):
                 state="normal",
                 command=lambda r=carpeta: self._reproducir_audio_clase(r),
             )
+            self.btn_retranscribir_audio.configure(state="normal")
         else:
             self.btn_reproducir_audio_detalle.configure(
                 state="disabled", command=lambda: None
             )
+            self.btn_retranscribir_audio.configure(state="disabled")
+        versiones = self.repositorio.versiones_transcripcion(carpeta)
+        activa = ficha.get("version_transcripcion_activa") or (
+            "definitiva" if ficha.get("transcripcion_final") else "directo"
+        )
+        self.btn_usar_directo.configure(
+            state="normal" if "directo" in versiones else "disabled"
+        )
+        self.btn_usar_definitiva.configure(
+            state="normal" if "definitiva" in versiones else "disabled"
+        )
+        self.estado_version_transcripcion.configure(
+            text=f"Versión activa: {activa}"
+        )
         word = carpeta / "apuntes_argos.docx"
         if word.is_file():
             self.btn_abrir_word_detalle.configure(
@@ -979,6 +1036,122 @@ class AsistenteClasesApp(ctk.CTk):
             self.repositorio.abrir_audio_clase(ruta)
         except Exception as exc:
             messagebox.showerror("Audio de la clase", str(exc))
+
+    def _retranscribir_audio_detalle(self):
+        if not self._ruta_detalle or self._retranscripcion_audio_en_curso:
+            return
+        if self.grabador and self.grabador.esta_grabando():
+            messagebox.showwarning(
+                "Retranscribir audio",
+                "Detén la grabación actual antes de retranscribir otra clase.",
+            )
+            return
+        if not self.transcriptor or not self.transcriptor.modelos_cargados:
+            messagebox.showwarning("Modelos", "Los modelos todavía no están listos.")
+            return
+        carpeta = Path(self._ruta_detalle)
+        audio = self.repositorio.obtener_audio_clase(carpeta)
+        if not audio:
+            messagebox.showerror(
+                "Retranscribir audio", "Esta clase no conserva un audio utilizable."
+            )
+            return
+        directo = self.repositorio.obtener_segmentos_transcripcion(
+            carpeta, "directo"
+        )
+        if not directo:
+            directo = self.repositorio.obtener_segmentos_transcripcion(carpeta)
+        self._retranscripcion_audio_en_curso = True
+        self.btn_retranscribir_audio.configure(
+            state="disabled", text="Retranscribiendo…"
+        )
+        self.estado_version_transcripcion.configure(
+            text=(
+                f"Preparando {self.config_obj.whisper_model_final}; "
+                "el audio original permanece intacto."
+            )
+        )
+
+        def worker():
+            try:
+                incremental = TranscripcionIncremental(
+                    self.transcriptor,
+                    self.repositorio,
+                    carpeta,
+                    callback_estado=lambda mensaje: self._enviar_ui(
+                        self.estado_version_transcripcion.configure,
+                        {"text": mensaje},
+                    ),
+                    consolidar_audio_completo=True,
+                    min_hablantes=self.config_obj.min_hablantes,
+                    max_hablantes=self.config_obj.max_hablantes,
+                    modelo_final=self.config_obj.whisper_model_final,
+                    segmentos_directo_iniciales=directo,
+                )
+                resultado = incremental.finalizar()
+                self._enviar_ui(
+                    self._fin_retranscripcion_audio,
+                    carpeta,
+                    resultado,
+                    None,
+                )
+            except Exception as exc:
+                self._enviar_ui(
+                    self._fin_retranscripcion_audio,
+                    carpeta,
+                    None,
+                    str(exc),
+                )
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="argos-retranscripcion-audio",
+        ).start()
+
+    def _fin_retranscripcion_audio(self, carpeta, resultado, error):
+        self._retranscripcion_audio_en_curso = False
+        self.btn_retranscribir_audio.configure(
+            state="normal", text="Retranscribir audio"
+        )
+        if error or resultado is None:
+            self.estado_version_transcripcion.configure(
+                text=f"No se pudo retranscribir: {error or 'error desconocido'}"
+            )
+            messagebox.showerror(
+                "Retranscribir audio", error or "No se pudo completar la operación."
+            )
+            return
+        self._refrescar_clases()
+        self._abrir_clase_en_argos(carpeta)
+        if resultado.errores:
+            messagebox.showwarning(
+                "Retranscribir audio",
+                "El audio se conserva, pero la pasada final terminó con avisos:\n\n"
+                + "\n".join(resultado.errores),
+            )
+            return
+        if hasattr(self, "_encolar_pipeline"):
+            self._encolar_pipeline(carpeta, automatico=True)
+        self.estado_version_transcripcion.configure(
+            text="Retranscripción terminada; ambas versiones quedan guardadas."
+        )
+
+    def _activar_version_transcripcion(self, version: str):
+        if not self._ruta_detalle:
+            return
+        carpeta = Path(self._ruta_detalle)
+        try:
+            self.repositorio.activar_version_transcripcion(carpeta, version)
+        except Exception as exc:
+            messagebox.showerror("Transcripción", str(exc))
+            return
+        self._abrir_clase_en_argos(carpeta)
+        if hasattr(self, "_encolar_pipeline"):
+            self._encolar_pipeline(carpeta, automatico=True)
+        self.estado_version_transcripcion.configure(
+            text=f"Versión activa: {version}. Actualizando el material…"
+        )
 
     def _mostrar_seccion_detalle(self, seccion):
         if not self._ruta_detalle:
@@ -1634,6 +1807,7 @@ class AsistenteClasesApp(ctk.CTk):
             consolidar_audio_completo=True,
             min_hablantes=self.config_obj.min_hablantes,
             max_hablantes=self.config_obj.max_hablantes,
+            modelo_final=self.config_obj.whisper_model_final,
         )
         self._modelo_grabacion_actual = self.transcriptor.model_size
         self.grabador = GrabadorAudio(dispositivo.sample_rate, dispositivo.indice)
@@ -2376,6 +2550,7 @@ class AsistenteClasesApp(ctk.CTk):
                         consolidar_audio_completo=True,
                         min_hablantes=self.config_obj.min_hablantes,
                         max_hablantes=self.config_obj.max_hablantes,
+                        modelo_final=self.config_obj.whisper_model_final,
                     )
                     incremental.encolar_varios(
                         self.repositorio.fragmentos_pendientes(carpeta)

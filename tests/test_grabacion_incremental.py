@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 import grabador as modulo_grabador
+from audio_asr import preparar_archivo_asr
 from grabador import (
     UMBRAL_SENAL_UTIL,
     DispositivoEntrada,
@@ -16,7 +17,10 @@ from grabador import (
     recuperar_audio_interrumpido,
 )
 from repositorio import RepositorioClases
-from transcripcion_incremental import TranscripcionIncremental
+from transcripcion_incremental import (
+    TranscripcionIncremental,
+    evaluar_versiones_transcripcion,
+)
 from transcriptor import SegmentoTranscrito
 
 
@@ -26,6 +30,48 @@ def _wav(ruta: Path, frames: int = 160, sample_rate: int = 16000) -> None:
         archivo.setsampwidth(2)
         archivo.setframerate(sample_rate)
         archivo.writeframes(struct.pack("<h", 1000) * frames)
+
+
+def test_audio_completo_se_acondiciona_por_bloques_y_borra_el_temporal(tmp_path):
+    original = tmp_path / "clase.wav"
+    _wav(original, frames=48000, sample_rate=48000)
+    contenido_original = original.read_bytes()
+
+    with preparar_archivo_asr(original, segundos_bloque=0.2) as (
+        procesado,
+        diagnostico,
+    ):
+        procesado = Path(procesado)
+        assert procesado != original
+        assert procesado.is_file()
+        with wave.open(str(procesado), "rb") as archivo:
+            assert archivo.getnchannels() == 1
+            assert archivo.getframerate() == 16000
+            assert archivo.getnframes() > 0
+        assert diagnostico["bloques"] > 1
+
+    assert not procesado.exists()
+    assert original.read_bytes() == contenido_original
+
+
+def test_puerta_de_calidad_rechaza_una_perdida_clara_de_cobertura():
+    directo = [
+        SegmentoTranscrito(
+            0,
+            60,
+            "La prostaciclina mantiene la vasodilatación renal y el flujo sanguíneo",
+            "SPEAKER_00",
+            "Docente",
+        )
+    ]
+    definitiva = [
+        SegmentoTranscrito(0, 8, "La prostaciclina", "SPEAKER_00", "Docente")
+    ]
+
+    decision = evaluar_versiones_transcripcion(directo, definitiva)
+
+    assert decision["version_elegida"] == "directo"
+    assert decision["ratio_palabras"] < 0.45
 
 
 def test_hardware_automatico_prefiere_microfono_real(monkeypatch):
@@ -1211,3 +1257,113 @@ def test_repara_wav_tras_cierre_inesperado_y_crea_tramo_pendiente(tmp_path):
     with wave.open(str(audio), "rb") as archivo:
         assert archivo.getnframes() == 25
     assert len(list((tmp_path / "fragmentos_audio").glob("*.wav"))) == 3
+
+
+def test_pasada_final_carga_turbo_sin_reemplazar_el_motor_directo(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    carpeta = repositorio.iniciar_grabacion("Farmacología", "Prostaglandinas")
+    _wav(carpeta / "audio.wav", frames=32000)
+    fragmento = carpeta / "fragmentos_audio" / "fragmento_000001.wav"
+    _wav(fragmento, frames=16000)
+    cargas = []
+    opciones_finales = []
+
+    class MotorDirecto:
+        model_size = "small"
+
+        @staticmethod
+        def transcribir_fragmento(_ruta):
+            return [
+                SegmentoTranscrito(
+                    0,
+                    1,
+                    "La prostaciclina produce vasodilatación renal",
+                    "SPEAKER_00",
+                    "Docente",
+                )
+            ]
+
+    class MotorFinal:
+        model_size = "large-v3-turbo"
+
+        @staticmethod
+        def transcribir_archivo(_ruta, **opciones):
+            opciones_finales.append(opciones)
+            return [
+                SegmentoTranscrito(
+                    0,
+                    2,
+                    "La prostaciclina produce vasodilatación renal y conserva el filtrado",
+                    "SPEAKER_00",
+                    "Docente",
+                )
+            ]
+
+    def crear(modelo, _progreso):
+        cargas.append(modelo)
+        return MotorFinal()
+
+    directo = MotorDirecto()
+    incremental = TranscripcionIncremental(
+        directo,
+        repositorio,
+        carpeta,
+        consolidar_audio_completo=True,
+        modelo_final="large-v3-turbo",
+        creador_transcriptor_final=crear,
+    )
+    incremental.encolar(FragmentoAudio(1, str(fragmento), 0, 1))
+    resultado = incremental.finalizar()
+
+    assert resultado.completa
+    assert cargas == ["large-v3-turbo"]
+    assert opciones_finales[0]["acondicionar_audio"] is True
+    assert incremental.transcriptor is directo
+    assert (carpeta / "transcripcion_directo.json").is_file()
+    assert (carpeta / "transcripcion_definitiva.json").is_file()
+    decision = json.loads(
+        (carpeta / "decision_transcripcion.json").read_text(encoding="utf-8")
+    )
+    assert decision["modelo_usado"] == "large-v3-turbo"
+    assert decision["version_elegida"] == "definitiva"
+
+
+def test_version_rechazada_se_conserva_y_puede_activarse_manualmente(tmp_path):
+    repositorio = RepositorioClases(str(tmp_path / "clases"))
+    carpeta = repositorio.iniciar_grabacion("Fisiología", "COX")
+    directo = [
+        SegmentoTranscrito(
+            0,
+            60,
+            "COX uno y COX dos originan prostanoides con efectos dependientes del tejido",
+            "SPEAKER_00",
+            "Docente",
+        )
+    ]
+    definitiva = [
+        SegmentoTranscrito(0, 5, "COX uno", "SPEAKER_00", "Docente")
+    ]
+    decision = evaluar_versiones_transcripcion(directo, definitiva)
+
+    activa = repositorio.finalizar_grabacion(
+        carpeta,
+        segmentos_finales=definitiva,
+        segmentos_directo=directo,
+        decision_transcripcion=decision,
+    )
+
+    assert activa == directo
+    assert "efectos dependientes" in (
+        carpeta / "transcripcion.txt"
+    ).read_text(encoding="utf-8")
+    assert "COX uno" in (
+        carpeta / "transcripcion_definitiva.txt"
+    ).read_text(encoding="utf-8")
+
+    restaurada = repositorio.activar_version_transcripcion(
+        carpeta, "definitiva"
+    )
+
+    assert restaurada == definitiva
+    ficha = json.loads((carpeta / "ficha.json").read_text(encoding="utf-8"))
+    assert ficha["version_transcripcion_activa"] == "definitiva"

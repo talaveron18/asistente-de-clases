@@ -9,12 +9,14 @@ amplificar silencio digital ni ocultar el audio fuente.
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 import wave
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-
 
 FRECUENCIA_ASR = 16000
 OBJETIVO_VOZ_DBFS = -22.0
@@ -94,29 +96,13 @@ def _remuestrear(muestras: np.ndarray, origen: int, destino: int) -> np.ndarray:
     return np.ascontiguousarray(salida, dtype=np.float32)
 
 
-def preparar_fragmento_asr(
-    ruta: str | Path,
-) -> tuple[str | np.ndarray, DiagnosticoAudioASR | None]:
-    """Devuelve audio mono/16 kHz acondicionado o la ruta si no es PCM WAV."""
-    ruta = str(ruta)
-    try:
-        with wave.open(ruta, "rb") as archivo:
-            canales = archivo.getnchannels()
-            ancho = archivo.getsampwidth()
-            sample_rate = archivo.getframerate()
-            frames = archivo.readframes(archivo.getnframes())
-    except (OSError, EOFError, wave.Error):
-        return ruta, None
-    if ancho != 2 or canales < 1 or sample_rate <= 0 or not frames:
-        return ruta, None
-
-    enteras = np.frombuffer(frames, dtype="<i2")
-    if enteras.size < canales:
-        return ruta, None
+def _acondicionar_pcm16(
+    enteras: np.ndarray,
+    canales: int,
+    sample_rate: int,
+) -> tuple[np.ndarray, DiagnosticoAudioASR]:
     enteras = enteras[: enteras.size - (enteras.size % canales)]
     matriz = enteras.reshape(-1, canales).astype(np.float32)
-    # La petición mono permite que Windows/driver entregue su mezcla procesada;
-    # este promedio es la red de seguridad para WAV multicanal antiguos.
     muestras = matriz.mean(axis=1) / 32768.0
     muestras -= float(np.mean(muestras, dtype=np.float64))
 
@@ -147,3 +133,103 @@ def preparar_fragmento_asr(
         sample_rate_asr=FRECUENCIA_ASR,
     )
     return acondicionadas, diagnostico
+
+
+def preparar_fragmento_asr(
+    ruta: str | Path,
+) -> tuple[str | np.ndarray, DiagnosticoAudioASR | None]:
+    """Devuelve audio mono/16 kHz acondicionado o la ruta si no es PCM WAV."""
+    ruta = str(ruta)
+    try:
+        with wave.open(ruta, "rb") as archivo:
+            canales = archivo.getnchannels()
+            ancho = archivo.getsampwidth()
+            sample_rate = archivo.getframerate()
+            frames = archivo.readframes(archivo.getnframes())
+    except (OSError, EOFError, wave.Error):
+        return ruta, None
+    if ancho != 2 or canales < 1 or sample_rate <= 0 or not frames:
+        return ruta, None
+
+    enteras = np.frombuffer(frames, dtype="<i2")
+    if enteras.size < canales:
+        return ruta, None
+    # La petición mono permite que Windows/driver entregue su mezcla procesada;
+    # este promedio es la red de seguridad para WAV multicanal antiguos.
+    acondicionadas, diagnostico = _acondicionar_pcm16(
+        enteras, canales, sample_rate
+    )
+    return acondicionadas, diagnostico
+
+
+@contextmanager
+def preparar_archivo_asr(
+    ruta: str | Path,
+    segundos_bloque: float = 30.0,
+):
+    """Acondiciona un WAV largo por bloques y elimina siempre el temporal.
+
+    La clase original permanece intacta y nunca se carga completa en memoria.
+    Para formatos no PCM se devuelve la ruta original, de modo que
+    Faster-Whisper/FFmpeg mantienen la compatibilidad existente.
+    """
+    ruta = str(ruta)
+    try:
+        with wave.open(ruta, "rb") as origen:
+            canales = origen.getnchannels()
+            ancho = origen.getsampwidth()
+            sample_rate = origen.getframerate()
+            total_frames = origen.getnframes()
+    except (OSError, EOFError, wave.Error):
+        yield ruta, None
+        return
+    if ancho != 2 or canales < 1 or sample_rate <= 0 or total_frames <= 0:
+        yield ruta, None
+        return
+
+    descriptor, temporal = tempfile.mkstemp(prefix="argos_asr_", suffix=".wav")
+    os.close(descriptor)
+    diagnosticos: list[DiagnosticoAudioASR] = []
+    frames_bloque = max(1, int(sample_rate * segundos_bloque))
+    try:
+        with wave.open(ruta, "rb") as origen, wave.open(temporal, "wb") as destino:
+            destino.setnchannels(1)
+            destino.setsampwidth(2)
+            destino.setframerate(FRECUENCIA_ASR)
+            while True:
+                frames = origen.readframes(frames_bloque)
+                if not frames:
+                    break
+                enteras = np.frombuffer(frames, dtype="<i2")
+                if enteras.size < canales:
+                    continue
+                acondicionadas, diagnostico = _acondicionar_pcm16(
+                    enteras, canales, sample_rate
+                )
+                diagnosticos.append(diagnostico)
+                pcm = np.round(acondicionadas * 32767.0).astype("<i2")
+                destino.writeframes(pcm.tobytes())
+        resumen = {
+            "procesado": True,
+            "bloques": len(diagnosticos),
+            "sample_rate_origen": sample_rate,
+            "sample_rate_asr": FRECUENCIA_ASR,
+            "ganancia_db_media": round(
+                sum(item.ganancia_db for item in diagnosticos)
+                / max(1, len(diagnosticos)),
+                2,
+            ),
+            "rms_activo_dbfs_maximo": round(
+                max(
+                    (item.rms_activo_dbfs for item in diagnosticos),
+                    default=-200.0,
+                ),
+                2,
+            ),
+        }
+        yield temporal, resumen
+    finally:
+        try:
+            os.remove(temporal)
+        except OSError:
+            pass

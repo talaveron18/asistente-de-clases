@@ -110,6 +110,10 @@ También puede utilizarse `EJECUTAR.bat`.
 - Faster-Whisper con GPU opcional y retorno a CPU.
 - Modelos hasta `large-v3-turbo`/`large-v3`, con Faster-Whisper 1.2.1 fijado
   para que el decodificador sea reproducible entre instaladores.
+- Directo con el modelo configurado y pasada definitiva independiente con
+  `large-v3-turbo`, usando el mismo acondicionamiento de voz por bloques.
+- Conservación de las versiones directa y definitiva, con selección automática
+  conservadora y posibilidad de restaurar o retranscribir desde la ficha.
 - VAD y límites de repetición activos; los tramos sin voz no se fuerzan a una
   segunda inferencia que pueda inventar texto.
 - Retorno automático a CPU si CUDA carga el modelo pero falla al transcribir.

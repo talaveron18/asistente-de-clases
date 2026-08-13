@@ -15,6 +15,7 @@ class Config:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         self.hf_token = ""
         self.whisper_model = "small"
+        self.whisper_model_final = "large-v3-turbo"
         self.idioma = "es"
         self.sample_rate = 16000
         self.min_hablantes = 2
@@ -45,7 +46,7 @@ class Config:
     def validar(self):
         if self.hf_token and len(self.hf_token) < 10:
             return False, "El token de Hugging Face parece incompleto. Déjalo vacío para transcribir sin diarización."
-        if self.whisper_model not in [
+        modelos_validos = [
             "tiny",
             "base",
             "small",
@@ -53,8 +54,11 @@ class Config:
             "large-v3-turbo",
             "large-v3",
             "large-v2",
-        ]:
+        ]
+        if self.whisper_model not in modelos_validos:
             return False, "Modelo Whisper no válido."
+        if self.whisper_model_final not in modelos_validos:
+            return False, "Modelo Whisper definitivo no válido."
         return True, "Configuración válida."
 
     def obtener_ruta_temp(self):

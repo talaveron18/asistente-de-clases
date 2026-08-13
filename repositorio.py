@@ -12,7 +12,6 @@ from typing import Iterable
 
 from transcriptor import SegmentoTranscrito
 
-
 _FICHA_LOCK = threading.RLock()
 _NOMBRE_PAPELERA = "Papelera ARGOS"
 
@@ -344,14 +343,30 @@ class RepositorioClases:
         carpeta: str | Path,
         error: str | None = None,
         segmentos_finales: Iterable[SegmentoTranscrito] | None = None,
+        segmentos_directo: Iterable[SegmentoTranscrito] | None = None,
+        decision_transcripcion: dict | None = None,
     ) -> list[SegmentoTranscrito]:
         carpeta = Path(carpeta)
-        segmentos_directo = RepositorioClases.segmentos_grabacion(carpeta)
+        directo = (
+            list(segmentos_directo)
+            if segmentos_directo is not None
+            else RepositorioClases.segmentos_grabacion(carpeta)
+        )
         if segmentos_finales is not None:
-            segmentos = list(segmentos_finales)
-            RepositorioClases._conservar_transcripcion_directo(carpeta)
+            definitiva = list(segmentos_finales)
+            RepositorioClases._escribir_transcripciones(
+                carpeta, directo, sufijo="_directo"
+            )
+            RepositorioClases._escribir_transcripciones(
+                carpeta, definitiva, sufijo="_definitiva"
+            )
+            version_activa = (
+                decision_transcripcion or {}
+            ).get("version_elegida", "definitiva")
+            segmentos = definitiva if version_activa == "definitiva" else directo
         else:
-            segmentos = segmentos_directo
+            segmentos = directo
+            version_activa = "directo"
         RepositorioClases._escribir_transcripciones(carpeta, segmentos)
         estado = "transcripcion_incompleta" if error else (
             "guardada" if segmentos else "sin_voz"
@@ -362,8 +377,11 @@ class RepositorioClases:
             ficha = json.loads(ficha_path.read_text(encoding="utf-8"))
             ficha["segmentos"] = len(segmentos)
             ficha["transcripcion_final"] = segmentos_finales is not None
+            ficha["version_transcripcion_activa"] = version_activa
             ficha["fuente_transcripcion"] = (
-                "audio_completo" if segmentos_finales is not None else "fragmentos_directo"
+                "audio_completo"
+                if version_activa == "definitiva"
+                else "fragmentos_directo"
             )
             if segmentos_finales is not None:
                 ficha["transcripcion_finalizada_iso"] = datetime.now().isoformat(
@@ -371,6 +389,11 @@ class RepositorioClases:
                 )
             ficha.update(_metadatos_archivo_audio(carpeta / "audio.wav"))
             _escribir_json_atomico(ficha_path, ficha)
+        if decision_transcripcion is not None:
+            _escribir_json_atomico(
+                carpeta / "decision_transcripcion.json",
+                decision_transcripcion,
+            )
         return segmentos
 
     @staticmethod
@@ -408,24 +431,116 @@ class RepositorioClases:
         return vinculados
 
     @staticmethod
-    def _conservar_transcripcion_directo(carpeta: Path) -> None:
-        """Guarda el borrador visible antes de sustituirlo por la pasada final."""
-        for origen, destino in (
-            ("transcripcion.txt", "transcripcion_directo.txt"),
-            ("transcripcion.md", "transcripcion_directo.md"),
-            ("subtitulos.srt", "subtitulos_directo.srt"),
-        ):
-            ruta_origen = carpeta / origen
-            ruta_destino = carpeta / destino
-            if ruta_destino.exists() or not ruta_origen.exists():
-                continue
-            _escribir_texto_atomico(
-                ruta_destino, ruta_origen.read_text(encoding="utf-8")
+    def _segmentos_desde_json(ruta: Path) -> list[SegmentoTranscrito]:
+        try:
+            datos = json.loads(ruta.read_text(encoding="utf-8"))
+            return limpiar_segmentos_solapados(
+                SegmentoTranscrito(**item)
+                for item in datos
+                if isinstance(item, dict)
             )
+        except (OSError, json.JSONDecodeError, TypeError):
+            return []
+
+    @staticmethod
+    def _segmentos_desde_srt(ruta: Path) -> list[SegmentoTranscrito]:
+        try:
+            contenido = ruta.read_text(encoding="utf-8")
+        except OSError:
+            return []
+
+        def segundos(valor: str) -> float:
+            horas, minutos, resto = valor.split(":")
+            segundos_texto, milisegundos = resto.split(",")
+            return (
+                int(horas) * 3600
+                + int(minutos) * 60
+                + int(segundos_texto)
+                + int(milisegundos) / 1000.0
+            )
+
+        segmentos = []
+        patron = re.compile(
+            r"(?m)^\d+\s*\n"
+            r"(\d{2}:\d{2}:\d{2},\d{3}) --> "
+            r"(\d{2}:\d{2}:\d{2},\d{3})\s*\n"
+            r"(?:\[([^\]]+)\]\s*)?(.*(?:\n(?!\n|\d+\s*$).*)*)"
+        )
+        for coincidencia in patron.finditer(contenido):
+            try:
+                inicio = segundos(coincidencia.group(1))
+                fin = segundos(coincidencia.group(2))
+            except (TypeError, ValueError):
+                continue
+            rol = (coincidencia.group(3) or "Docente").strip()
+            texto = " ".join(coincidencia.group(4).split())
+            if texto:
+                segmentos.append(
+                    SegmentoTranscrito(inicio, fin, texto, "SPEAKER_00", rol)
+                )
+        return limpiar_segmentos_solapados(segmentos)
+
+    @staticmethod
+    def obtener_segmentos_transcripcion(
+        carpeta: str | Path, version: str = "activa"
+    ) -> list[SegmentoTranscrito]:
+        carpeta = Path(carpeta)
+        sufijo = "" if version == "activa" else f"_{version}"
+        json_path = carpeta / f"transcripcion{sufijo}.json"
+        segmentos = RepositorioClases._segmentos_desde_json(json_path)
+        if segmentos:
+            return segmentos
+        return RepositorioClases._segmentos_desde_srt(
+            carpeta / f"subtitulos{sufijo}.srt"
+        )
+
+    @staticmethod
+    def versiones_transcripcion(carpeta: str | Path) -> set[str]:
+        carpeta = Path(carpeta)
+        return {
+            version
+            for version in ("directo", "definitiva")
+            if RepositorioClases.obtener_segmentos_transcripcion(
+                carpeta, version
+            )
+        }
+
+    @staticmethod
+    def activar_version_transcripcion(
+        carpeta: str | Path, version: str
+    ) -> list[SegmentoTranscrito]:
+        if version not in {"directo", "definitiva"}:
+            raise ValueError("Versión de transcripción no válida.")
+        carpeta = Path(carpeta)
+        segmentos = RepositorioClases.obtener_segmentos_transcripcion(
+            carpeta, version
+        )
+        if not segmentos:
+            raise FileNotFoundError(
+                f"No existe una transcripción {version} recuperable."
+            )
+        RepositorioClases._escribir_transcripciones(carpeta, segmentos)
+        ficha_path = carpeta / "ficha.json"
+        with _FICHA_LOCK:
+            ficha = json.loads(ficha_path.read_text(encoding="utf-8"))
+            ficha["version_transcripcion_activa"] = version
+            ficha["fuente_transcripcion"] = (
+                "audio_completo"
+                if version == "definitiva"
+                else "fragmentos_directo"
+            )
+            ficha["segmentos"] = len(segmentos)
+            ficha["ultima_actualizacion"] = datetime.now().isoformat(
+                timespec="seconds"
+            )
+            _escribir_json_atomico(ficha_path, ficha)
+        return segmentos
 
     @staticmethod
     def _escribir_transcripciones(
-        carpeta: Path, segmentos: Iterable[SegmentoTranscrito]
+        carpeta: Path,
+        segmentos: Iterable[SegmentoTranscrito],
+        sufijo: str = "",
     ) -> None:
         segmentos = list(segmentos)
         titulo = carpeta.name.split(" · ", 2)[-1]
@@ -434,8 +549,21 @@ class RepositorioClases:
         md = "# " + titulo + "\n\n" + "\n\n".join(
             s.a_linea_markdown() for s in parrafos
         )
-        _escribir_texto_atomico(carpeta / "transcripcion.txt", txt)
-        _escribir_texto_atomico(carpeta / "transcripcion.md", md)
+        _escribir_texto_atomico(carpeta / f"transcripcion{sufijo}.txt", txt)
+        _escribir_texto_atomico(carpeta / f"transcripcion{sufijo}.md", md)
+        _escribir_json_atomico(
+            carpeta / f"transcripcion{sufijo}.json",
+            [
+                {
+                    "inicio": segmento.inicio,
+                    "fin": segmento.fin,
+                    "texto": segmento.texto,
+                    "hablante_original": segmento.hablante_original,
+                    "rol": segmento.rol,
+                }
+                for segmento in segmentos
+            ],
+        )
 
         lineas_srt = []
         for i, seg in enumerate(segmentos, 1):
@@ -451,7 +579,7 @@ class RepositorioClases:
                 f"[{seg.rol}] {seg.texto.strip()}\n"
             )
         _escribir_texto_atomico(
-            carpeta / "subtitulos.srt", "\n".join(lineas_srt)
+            carpeta / f"subtitulos{sufijo}.srt", "\n".join(lineas_srt)
         )
 
     def guardar_clase(self, materia: str, titulo: str, segmentos: Iterable, audio_origen: str | None = None) -> Path:

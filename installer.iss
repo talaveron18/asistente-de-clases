@@ -1,6 +1,6 @@
-; ARGOS 0.7.3 — acondicionamiento de voz y protección anti-alucinaciones
+; ARGOS 0.7.4 — doble pasada segura y versiones recuperables
 #define MyAppName "ARGOS"
-#define MyAppVersion "0.7.3"
+#define MyAppVersion "0.7.4"
 #define MyAppPublisher "Fernando Talaverón"
 #define MyAppExeName "ARGOS.exe"
 

@@ -7,11 +7,11 @@ import subprocess
 import sys
 import threading
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
-from audio_asr import preparar_fragmento_asr
-
+from audio_asr import preparar_archivo_asr, preparar_fragmento_asr
 
 OPCIONES_DECODIFICACION = {
     "language": None,
@@ -316,6 +316,23 @@ class TranscriptorClases:
             self._descartes_pendientes = []
         return descartes
 
+    def crear_motor_para_modelo(
+        self,
+        model_size: str,
+        callback_status: Optional[Callable] = None,
+    ) -> "TranscriptorClases":
+        """Carga un motor independiente sin reemplazar el usado en directo."""
+        if model_size == self.model_size:
+            return self
+        motor = TranscriptorClases(
+            hf_token=self.hf_token,
+            model_size=model_size,
+            usar_gpu=self.usar_gpu,
+            idioma=self.idioma,
+        )
+        motor.cargar_modelos(callback_status)
+        return motor
+
     def _filtrar_segmentos(self, segmentos, ambito: str) -> list[_SegmentoReconocido]:
         resultado = []
         for segmento in segmentos:
@@ -389,6 +406,7 @@ class TranscriptorClases:
         callback_progreso=None,
         min_hablantes: int = 2,
         max_hablantes: int = 10,
+        acondicionar_audio: bool = False,
     ):
         if not self.modelos_cargados or self.whisper_model is None:
             raise RuntimeError("Los modelos no están cargados.")
@@ -399,43 +417,77 @@ class TranscriptorClases:
             if callback_progreso:
                 callback_progreso(msg, p)
 
-        prog("Transcribiendo con Whisper...", 0.05)
-        segmentos_whisper, _info = self._inferir(
-            archivo_audio,
-            **self._opciones_decodificacion(silencio_ms=500),
+        contexto_audio = (
+            preparar_archivo_asr(archivo_audio)
+            if acondicionar_audio
+            else nullcontext((archivo_audio, None))
         )
-        self._historial_fragmentos.clear()
-        segmentos_whisper = self._filtrar_segmentos(
-            segmentos_whisper, ambito="archivo"
-        )
-        if not segmentos_whisper:
-            return []
-        prog(f"Texto detectado: {len(segmentos_whisper)} segmentos.", 0.55)
+        with contexto_audio as (entrada_asr, diagnostico):
+            if diagnostico is not None:
+                self.ultimo_diagnostico_audio = diagnostico
+                prog("Audio acondicionado en mono a 16 kHz.", 0.04)
+            prog("Transcribiendo con Whisper...", 0.05)
+            segmentos_whisper, _info = self._inferir(
+                entrada_asr,
+                **self._opciones_decodificacion(silencio_ms=500),
+            )
+            self._historial_fragmentos.clear()
+            segmentos_whisper = self._filtrar_segmentos(
+                segmentos_whisper, ambito="archivo"
+            )
+            if not segmentos_whisper:
+                return []
+            prog(f"Texto detectado: {len(segmentos_whisper)} segmentos.", 0.55)
 
-        if not self.diarizacion_disponible:
-            prog("Finalizando sin diarización.", 1.0)
-            return [
-                SegmentoTranscrito(
-                    s.start, s.end, s.text, "SPEAKER_00", "Docente"
-                )
-                for s in segmentos_whisper
-            ]
+            if not self.diarizacion_disponible:
+                prog("Finalizando sin diarización.", 1.0)
+                return [
+                    SegmentoTranscrito(
+                        s.start, s.end, s.text, "SPEAKER_00", "Docente"
+                    )
+                    for s in segmentos_whisper
+                ]
 
-        prog("Separando voces...", 0.6)
-        kwargs = {"num_speakers": min_hablantes} if min_hablantes == max_hablantes else {"min_speakers": min_hablantes, "max_speakers": max_hablantes}
-        with self._transcripcion_lock:
-            salida = self.diarization_pipeline(archivo_audio, **kwargs)
-        anotacion = getattr(salida, "exclusive_speaker_diarization", None) or getattr(salida, "speaker_diarization", None) or salida
-        turnos = []
-        if hasattr(anotacion, "itertracks"):
-            for turno, _, hablante in anotacion.itertracks(yield_label=True):
-                turnos.append({"inicio": turno.start, "fin": turno.end, "hablante": hablante})
-        else:
-            for turno, hablante in anotacion:
-                turnos.append({"inicio": turno.start, "fin": turno.end, "hablante": hablante})
+            prog("Separando voces...", 0.6)
+            kwargs = (
+                {"num_speakers": min_hablantes}
+                if min_hablantes == max_hablantes
+                else {
+                    "min_speakers": min_hablantes,
+                    "max_speakers": max_hablantes,
+                }
+            )
+            with self._transcripcion_lock:
+                salida = self.diarization_pipeline(entrada_asr, **kwargs)
+            anotacion = (
+                getattr(salida, "exclusive_speaker_diarization", None)
+                or getattr(salida, "speaker_diarization", None)
+                or salida
+            )
+            turnos = []
+            if hasattr(anotacion, "itertracks"):
+                for turno, _, hablante in anotacion.itertracks(yield_label=True):
+                    turnos.append(
+                        {
+                            "inicio": turno.start,
+                            "fin": turno.end,
+                            "hablante": hablante,
+                        }
+                    )
+            else:
+                for turno, hablante in anotacion:
+                    turnos.append(
+                        {
+                            "inicio": turno.start,
+                            "fin": turno.end,
+                            "hablante": hablante,
+                        }
+                    )
 
-        prog("Transcripción completada.", 1.0)
-        return self._asignar_roles(self._fusionar(segmentos_whisper, turnos))
+            prog("Transcripción completada.", 1.0)
+            return self._asignar_roles(
+                self._fusionar(segmentos_whisper, turnos)
+            )
 
     def transcribir_fragmento(self, archivo_audio: str):
         """Transcribe un fragmento corto sin bloquear la captura de audio.
