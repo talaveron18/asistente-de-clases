@@ -15,15 +15,46 @@ from audio_asr import preparar_archivo_asr, preparar_fragmento_asr
 
 OPCIONES_DECODIFICACION = {
     "language": None,
-    "beam_size": 3,
     "vad_filter": True,
     "condition_on_previous_text": False,
     "repetition_penalty": 1.08,
     "no_repeat_ngram_size": 4,
     "compression_ratio_threshold": 2.4,
     "log_prob_threshold": -1.0,
-    "no_speech_threshold": 0.6,
     "temperature": 0.0,
+    "word_timestamps": True,
+    "hallucination_silence_threshold": 2.0,
+}
+
+PERFILES_DECODIFICACION = {
+    # En directo se prima la estabilidad: el umbral recupera voz distante sin
+    # hacer que el ruido de aula llegue continuamente a Whisper.
+    "directo": {
+        "beam_size": 3,
+        "no_speech_threshold": 0.6,
+        "vad_parameters": {
+            "threshold": 0.35,
+            "min_speech_duration_ms": 180,
+            "max_speech_duration_s": 28,
+            "min_silence_duration_ms": 350,
+            "speech_pad_ms": 500,
+        },
+    },
+    # La pasada definitiva puede dedicar más cálculo y ser más sensible. El
+    # umbral 0.25 recupera la voz lejana que el valor 0.5 trataba como silencio;
+    # las marcas de palabra limitan alucinaciones durante pausas largas.
+    "definitivo": {
+        "beam_size": 5,
+        "patience": 1.1,
+        "no_speech_threshold": 0.7,
+        "vad_parameters": {
+            "threshold": 0.25,
+            "min_speech_duration_ms": 180,
+            "max_speech_duration_s": 28,
+            "min_silence_duration_ms": 700,
+            "speech_pad_ms": 600,
+        },
+    },
 }
 _PATRON_PALABRA = re.compile(r"\w+", flags=re.UNICODE)
 
@@ -278,15 +309,13 @@ class TranscriptorClases:
                         f"por CPU. GPU: {error_gpu}. CPU: {error_cpu}"
                     ) from error_cpu
 
-    def _opciones_decodificacion(self, silencio_ms: int) -> dict:
+    def _opciones_decodificacion(self, perfil: str) -> dict:
+        if perfil not in PERFILES_DECODIFICACION:
+            raise ValueError(f"Perfil de decodificación desconocido: {perfil}")
         opciones = dict(OPCIONES_DECODIFICACION)
         opciones["language"] = None if self.idioma == "auto" else self.idioma
-        opciones["vad_parameters"] = {
-            "threshold": 0.5,
-            "min_speech_duration_ms": 250,
-            "min_silence_duration_ms": silencio_ms,
-            "speech_pad_ms": 400,
-        }
+        opciones.update(PERFILES_DECODIFICACION[perfil])
+        opciones["vad_parameters"] = dict(opciones["vad_parameters"])
         return opciones
 
     def _registrar_descarte(
@@ -429,7 +458,7 @@ class TranscriptorClases:
             prog("Transcribiendo con Whisper...", 0.05)
             segmentos_whisper, _info = self._inferir(
                 entrada_asr,
-                **self._opciones_decodificacion(silencio_ms=500),
+                **self._opciones_decodificacion("definitivo"),
             )
             self._historial_fragmentos.clear()
             segmentos_whisper = self._filtrar_segmentos(
@@ -505,7 +534,7 @@ class TranscriptorClases:
             diagnostico.como_dict() if diagnostico is not None else None
         )
         segmentos_originales, _info = self._inferir(
-            audio_asr, **self._opciones_decodificacion(silencio_ms=350)
+            audio_asr, **self._opciones_decodificacion("directo")
         )
         segmentos_iter = self._filtrar_segmentos(
             segmentos_originales, ambito="directo"
