@@ -42,6 +42,14 @@ jobs:
           pip install -r requirements-installer.txt
           pip install pytest
 
+      - name: Asignar versión automática
+        shell: pwsh
+        run: |
+          $version = "0.8.$env:GITHUB_RUN_NUMBER"
+          "__version__ = `"$version`"" | Set-Content version.py -Encoding utf8
+          "ARGOS_VERSION=$version" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Validar código y pruebas
         shell: pwsh
         run: |
@@ -201,7 +209,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=$env:ARGOS_VERSION" installer.iss
 
       - name: Probar instalación y desinstalación aisladas
         shell: pwsh
@@ -269,11 +278,25 @@ jobs:
           "ARGOS-Setup.exe: $tamano bytes" | Out-File `
             -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
+      - name: Crear manifiesto de actualización
+        shell: pwsh
+        run: |
+          $instalador = Get-Item "release\ARGOS-Setup.exe"
+          $huella = (Get-FileHash $instalador.FullName -Algorithm SHA256).Hash.ToLower()
+          @{
+            version = $env:ARGOS_VERSION
+            sha256 = $huella
+            tamano = $instalador.Length
+          } | ConvertTo-Json | Set-Content `
+            -Path "release\ARGOS-version.json" -Encoding utf8
+
       - name: Publicar artefacto
         uses: actions/upload-artifact@v4
         with:
           name: ARGOS-Setup
-          path: release/ARGOS-Setup.exe
+          path: |
+            release/ARGOS-Setup.exe
+            release/ARGOS-version.json
           if-no-files-found: error
           retention-days: 30
 
@@ -287,7 +310,9 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release delete latest --yes --cleanup-tag
           }
-          gh release create latest "release/ARGOS-Setup.exe#ARGOS-Setup.exe" `
-            --title "ARGOS — última versión" `
+          gh release create latest `
+            "release/ARGOS-Setup.exe#ARGOS-Setup.exe" `
+            "release/ARGOS-version.json#ARGOS-version.json" `
+            --title "ARGOS $env:ARGOS_VERSION" `
             --notes "Instalador único de ARGOS para Windows. Incluye la aplicación y FFmpeg; no requiere Python." `
             --latest

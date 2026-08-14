@@ -8,6 +8,13 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
+from actualizador import (
+    Actualizacion,
+    actualizaciones_habilitadas,
+    buscar_actualizacion,
+    descargar_instalador,
+    lanzar_instalador,
+)
 from bloqueos import BloqueoArchivo, BloqueoOcupadoError
 from chat_argos import ChatArgos
 from indice_sqlite import IndiceConocimientoSQLite
@@ -23,6 +30,7 @@ from interfaz_argos import (
 )
 from main import AsistenteClasesApp, registrar_diagnostico_arranque
 from orquestador import ClaseEnProcesoError, OrquestadorArgos
+from version import __version__
 
 
 class ArgosApp(AsistenteClasesApp):
@@ -64,6 +72,95 @@ class ArgosApp(AsistenteClasesApp):
             daemon=True,
             name="argos-pipeline",
         ).start()
+        self.after(2500, self._comprobar_actualizaciones)
+
+    def _comprobar_actualizaciones(self) -> None:
+        if not actualizaciones_habilitadas():
+            return
+
+        def worker():
+            try:
+                actualizacion = buscar_actualizacion(__version__)
+            except Exception:
+                # La falta de conexión nunca debe impedir abrir ni usar ARGOS.
+                return
+            if actualizacion:
+                self._enviar_ui(self._ofrecer_actualizacion, actualizacion)
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="argos-actualizaciones",
+        ).start()
+
+    def _ofrecer_actualizacion(self, actualizacion: Actualizacion) -> None:
+        if self.grabador and self.grabador.esta_grabando():
+            self.after(60_000, self._ofrecer_actualizacion, actualizacion)
+            return
+        aceptar = messagebox.askyesno(
+            "Actualización de ARGOS",
+            f"Está disponible ARGOS {actualizacion.version}.\n\n"
+            "¿Quieres descargarlo e instalarlo ahora? ARGOS se cerrará y "
+            "volverá a abrirse al terminar.",
+        )
+        if not aceptar:
+            return
+        self.estado.configure(text="Descargando actualización de ARGOS…")
+
+        def progreso(descargado: int, total: int) -> None:
+            porcentaje = round(descargado * 100 / total) if total else 0
+            self._enviar_ui(
+                self._mostrar_estado_actualizacion,
+                f"Descargando actualización… {min(porcentaje, 100)} %",
+            )
+
+        def worker():
+            try:
+                instalador = descargar_instalador(actualizacion, progreso=progreso)
+                self._enviar_ui(
+                    self._instalar_actualizacion_cuando_este_libre,
+                    instalador,
+                )
+            except Exception as exc:
+                self._enviar_ui(
+                    messagebox.showerror,
+                    "Actualización de ARGOS",
+                    "No se pudo instalar la actualización. ARGOS seguirá "
+                    f"funcionando con normalidad.\n\nDetalle: {exc}",
+                )
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="argos-descarga-actualizacion",
+        ).start()
+
+    def _mostrar_estado_actualizacion(self, mensaje: str) -> None:
+        self.estado.configure(text=mensaje)
+
+    def _instalar_actualizacion_cuando_este_libre(self, instalador: Path) -> None:
+        grabando = bool(self.grabador and self.grabador.esta_grabando())
+        if grabando or self._pipeline_activo:
+            self.estado.configure(
+                text="Actualización descargada; se instalará al terminar el trabajo actual."
+            )
+            self.after(
+                10_000,
+                self._instalar_actualizacion_cuando_este_libre,
+                instalador,
+            )
+            return
+        try:
+            lanzar_instalador(instalador)
+            self.estado.configure(
+                text="Instalando actualización; ARGOS se reiniciará…"
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Actualización de ARGOS",
+                "No se pudo iniciar el instalador. ARGOS seguirá funcionando "
+                f"con normalidad.\n\nDetalle: {exc}",
+            )
 
     def _mostrar_resultados(self, caja, segmentos, carpeta):
         caja.delete("1.0", "end")

@@ -1,6 +1,8 @@
-; ARGOS 0.7.4 — doble pasada segura y versiones recuperables
+; ARGOS — instalador único y actualización automática
 #define MyAppName "ARGOS"
-#define MyAppVersion "0.7.4"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.8.0-dev"
+#endif
 #define MyAppPublisher "Fernando Talaverón"
 #define MyAppExeName "ARGOS.exe"
 
@@ -22,6 +24,8 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupLogging=yes
+CloseApplications=yes
+RestartApplications=yes
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
