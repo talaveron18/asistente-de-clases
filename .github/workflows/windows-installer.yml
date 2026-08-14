@@ -2,6 +2,8 @@ name: Construir ARGOS para Windows
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
   push:
     branches: [main, refactor/single-installer]
     paths:
