@@ -122,8 +122,18 @@ def test_pasada_final_no_arrastra_texto_previo_ni_prompt(tmp_path):
     )
 
     assert resultado[0].rol == "Docente"
-    assert modelo.llamadas[0]["beam_size"] == 3
+    assert modelo.llamadas[0]["beam_size"] == 5
     assert modelo.llamadas[0]["condition_on_previous_text"] is False
+    assert modelo.llamadas[0]["language"] == "es"
+    assert modelo.llamadas[0]["word_timestamps"] is True
+    assert modelo.llamadas[0]["hallucination_silence_threshold"] == 2.0
+    assert modelo.llamadas[0]["vad_parameters"] == {
+        "threshold": 0.25,
+        "min_speech_duration_ms": 180,
+        "max_speech_duration_s": 28,
+        "min_silence_duration_ms": 700,
+        "speech_pad_ms": 600,
+    }
     assert "initial_prompt" not in modelo.llamadas[0]
 
 
@@ -155,6 +165,16 @@ def test_directo_acondiciona_voz_lejana_y_mantiene_vad(tmp_path):
     assert procesado.size == 16000 * segundos
     assert float(np.sqrt(np.mean(procesado.astype(np.float64) ** 2))) > 0.04
     assert modelo.llamadas[0]["vad_filter"] is True
+    assert modelo.llamadas[0]["beam_size"] == 3
+    assert modelo.llamadas[0]["word_timestamps"] is True
+    assert modelo.llamadas[0]["hallucination_silence_threshold"] == 2.0
+    assert modelo.llamadas[0]["vad_parameters"] == {
+        "threshold": 0.35,
+        "min_speech_duration_ms": 180,
+        "max_speech_duration_s": 28,
+        "min_silence_duration_ms": 350,
+        "speech_pad_ms": 500,
+    }
     assert modelo.llamadas[0]["repetition_penalty"] > 1
     assert modelo.llamadas[0]["no_repeat_ngram_size"] == 4
     assert motor.ultimo_diagnostico_audio["ganancia_db"] > 10
